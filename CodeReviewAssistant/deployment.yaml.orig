@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-review-assistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: code-review-assistant
+  template:
+    metadata:
+      labels:
+        app: code-review-assistant
+    spec:
+      containers:
+      - name: code-review-assistant
+        image: DOCKER_HOST_URI:5000/code-review-assistant:SEMVER
+        ports:
+        - containerPort: 7860
+        env:
+        - name: GRADIO_SERVER_NAME
+          value: "0.0.0.0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-review-assistant-service
+spec:
+  selector:
+    app: code-review-assistant
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 7860
+  type: NodePort

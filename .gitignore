@@ -1,0 +1,7 @@
+*.bin
+**/chroma_db
+**/__pycache__
+**/.DS_Store
+**/.vscode/
+**/.gradio
+config
