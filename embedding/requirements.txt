@@ -1,0 +1,14 @@
+gradio==5.11.0
+pq
+psycopg[binary,pool]
+psycopg2-binary
+langchain
+langchain_community
+langchain_core
+langchain_ollama
+langchain_postgres
+pgvector
+bs4
+tiktoken
+duckduckgo_search
+openlit

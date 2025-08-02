@@ -1,0 +1,39 @@
+{
+    "embeddings": {
+        "nomic-embed-text": 0.0002
+    },
+    "chat": {
+		"phi4": {
+            "promptPrice": 0.00025,
+            "completionPrice": 0.00125
+		},
+        "deepseek-r1:7b":{
+            "promptPrice": 0.00055,
+            "completionPrice": 0.00219
+        },
+        "deepseek-r1:32b":{
+            "promptPrice": 0.0055,
+            "completionPrice": 0.0219
+        },
+        "deepseek-r1:70b":{
+            "promptPrice": 0.055,
+            "completionPrice": 0.219
+        },
+        "qwen2.5-coder":{
+            "promptPrice": 0.0001,
+            "completionPrice": 0.0002
+        },
+        "llama3.2":{
+            "promptPrice": 0.00001,
+            "completionPrice": 0.00020
+        },
+        "olmo2":{
+            "promptPrice": 0.00055,
+            "completionPrice": 0.00219
+        },
+        "dolphin3":{
+            "promptPrice": 0.0012,
+            "completionPrice": 0.0030
+        }
+	}
+}

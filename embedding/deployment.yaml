@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: summarize-web-pages-deployment
+  labels:
+    app: summarize-web-pages
+    environment: production
+    version: SEMVER
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: summarize-web-pages
+  template:
+    metadata:
+      labels:
+        app: summarize-web-pages
+        version: SEMVER
+    spec:
+      containers:
+      - name: summarize-web-pages
+        image: DOCKER_HOST_URI/summarize-web-pages:SEMVER
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 7860
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
