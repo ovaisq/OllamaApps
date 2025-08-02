@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: markdown-document-chatbot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: markdown-document-chatbot
+  template:
+    metadata:
+      labels:
+        app: markdown-document-chatbot
+    spec:
+      containers:
+      - name: markdown-document-chatbot
+        image: DOCKER_HOST_URI:5000/markdown-document-chatbot:SEMVER
+        ports:
+        - containerPort: 7860
+        env:
+        - name: GRADIO_SERVER_NAME
+          value: "0.0.0.0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: markdown-document-chatbot
+spec:
+  selector:
+    app: markdown-document-chatbot
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 7860
+  type: NodePort
