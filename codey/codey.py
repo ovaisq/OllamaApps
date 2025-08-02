@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 
+"""
+Script for indexing a Python codebase, searching it using embeddings,
+and interacting with an LLM to answer questions about the code.
+
+Features:
+- Indexes Python files from a specified directory.
+- Searches indexed files for relevant snippets based on a query.
+- Uses decision logic to determine whether to search or read files.
+- Interacts with an LLM to provide answers to user queries.
+"""
+
 import os
 import glob
 import json
@@ -10,34 +21,45 @@ import chromadb
 import concurrent.futures
 import argparse
 
-"""Script for indexing a Python codebase, searching it using embeddings,
-    and interacting with an LLM to answer questions about the code.
 
-    Features:
-    - Indexes Python files from a specified directory.
-    - Searches indexed files for relevant snippets based on a query.
-    - Uses decision logic to determine whether to search or read files.
-    - Interacts with an LLM to provide answers to user queries.
-"""
-
+# Configuration
 OLLAMA_REMOTE_HOST = "http://"
 OLLAMA_MODEL = "phi4-mini"
 
+# ChromaDB client and collection
 client = chromadb.Client()
 collection = client.create_collection("codebase")
 
-def extract_json(raw_text):
-    # Try to extract JSON from ```json ... ``` fences
+
+def extract_json(raw_text: str) -> str:
+    """
+    Extracts JSON from text that may be enclosed in ```json ... ``` fences.
+
+    Args:
+        raw_text (str): Raw string potentially containing JSON.
+
+    Returns:
+        str: Extracted JSON string.
+    """
     match = re.search(r"```json\s*(\{.*?\})\s*```", raw_text, re.DOTALL)
     if match:
         return match.group(1)
-    # Fallback: find {...}
+    # Fallback to find {...}
     match = re.search(r"(\{.*\})", raw_text, re.DOTALL)
     return match.group(1) if match else raw_text
 
-def embed_text(text: str):
+
+def embed_text(text: str) -> list:
+    """
+    Generates an embedding for the given text using Ollama's model.
+
+    Args:
+        text (str): Text to be embedded.
+
+    Returns:
+        list: Embedding vector or empty list on error.
+    """
     try:
-        #model="nomic-embed-text",
         response = ollama.embed(
             model="granite-embedding:278m",
             input=text,
@@ -47,7 +69,16 @@ def embed_text(text: str):
         print(f"Embedding call error: {e}")
         return []
 
-def process_chunk(file_path, chunk_idx, chunk):
+
+def process_chunk(file_path: str, chunk_idx: int, chunk: str):
+    """
+    Embeds a text chunk and adds it to the ChromaDB collection.
+
+    Args:
+        file_path (str): Path of the source file.
+        chunk_idx (int): Index of the chunk within the file.
+        chunk (str): Text chunk to process.
+    """
     embedding = embed_text(chunk)
     if embedding:
         collection.add(
@@ -57,15 +88,41 @@ def process_chunk(file_path, chunk_idx, chunk):
             metadatas=[{"file": file_path}]
         )
 
-EXCLUDED_EXTENSIONS = {'.png', '.pem', '.jpg', '.log', '.yml', '.pyc', '.p8', '.gif', '.woff', '.eot', '.tiff', '.ttf', '.webp', '.svg', '.jpeg', '.ico', '.mp3'}
+
+# Excluded file types and names
+EXCLUDED_EXTENSIONS = {
+    '.png', '.pem', '.jpg', '.log', '.yml', '.pyc', '.p8',
+    '.gif', '.woff', '.eot', '.tiff', '.ttf', '.webp', '.svg',
+    '.jpeg', '.ico', '.mp3'
+}
 EXCLUDED_FILENAMES = {'Dockerfile'}
 
-def is_excluded(file_path):
+
+def is_excluded(file_path: str) -> bool:
+    """
+    Determines whether a file should be excluded from indexing.
+
+    Args:
+        file_path (str): Full path to the file.
+
+    Returns:
+        bool: True if the file should be excluded.
+    """
     _, ext = os.path.splitext(file_path)
     file_name = os.path.basename(file_path)
     return ext.lower() in EXCLUDED_EXTENSIONS or file_name in EXCLUDED_FILENAMES
 
-def index_codebase(path):
+
+def index_codebase(path: str) -> list:
+    """
+    Indexes all non-excluded Python files in the given directory.
+
+    Args:
+        path (str): Root directory to index.
+
+    Returns:
+        list: List of indexed file paths.
+    """
     files_indexed = []
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
@@ -78,12 +135,22 @@ def index_codebase(path):
             for idx, chunk in enumerate(chunks):
                 futures.append(executor.submit(process_chunk, file_path, idx, chunk))
             files_indexed.append(file_path)
-        # Wait for all futures to complete
         concurrent.futures.wait(futures)
     print(f"Indexed {len(files_indexed)} files.")
     return files_indexed
 
-def search_code(query, k=3):
+
+def search_code(query: str, k: int = 3) -> list:
+    """
+    Searches for relevant code snippets based on a query using embeddings.
+
+    Args:
+        query (str): Query string.
+        k (int): Number of results to return.
+
+    Returns:
+        list: List of tuples (file_path, snippet).
+    """
     query_embedding = embed_text(query)
     if not query_embedding:
         return []
@@ -92,7 +159,17 @@ def search_code(query, k=3):
     meta = results["metadatas"][0]
     return [(meta[i]["file"], docs[i]) for i in range(len(docs))]
 
-def read_file(path):
+
+def read_file(path: str) -> str:
+    """
+    Reads the contents of a file.
+
+    Args:
+        path (str): Path to the file.
+
+    Returns:
+        str: File content or None if error.
+    """
     if not os.path.isfile(path):
         print(f"Skipping invalid path: {path}")
         return None
@@ -103,14 +180,50 @@ def read_file(path):
         print(f"Failed to read {path}: {e}")
         return None
 
-def list_files(path):
+
+def list_files(path: str) -> list:
+    """
+    Lists all Python files in the directory recursively.
+
+    Args:
+        path (str): Root directory.
+
+    Returns:
+        list: List of Python file paths.
+    """
     return [f for f in glob.glob(f"{path}/**/*.py", recursive=True)]
 
-def ollama_chat(model, messages):
-    return ollama.chat(model=model, messages=messages, options={"temprature":0,"top_p": 0.9,"num_predict": 512,"repeat_penalty": 1.1})["message"]["content"]
 
-# Decision Agent
-def get_decision(user_query, context, available_files):
+def ollama_chat(model: str, messages: list) -> str:
+    """
+    Sends a chat request to Ollama and returns the response.
+
+    Args:
+        model (str): Model name.
+        messages (list): List of message dicts.
+
+    Returns:
+        str: Response content from LLM.
+    """
+    return ollama.chat(
+        model=model,
+        messages=messages,
+        options={"temperature": 0, "top_p": 0.9, "num_predict": 512, "repeat_penalty": 1.1}
+    )["message"]["content"]
+
+
+def get_decision(user_query: str, context: str, available_files: list) -> dict:
+    """
+    Decides the next action (search/read/answer) based on user query and current context.
+
+    Args:
+        user_query (str): User's question.
+        context (str): Current context.
+        available_files (list): List of files that can be read.
+
+    Returns:
+        dict: Decision JSON with action, args, reasoning.
+    """
     decision_prompt = f"""
 You are a code exploration agent. Your goal is to answer the user's question in the fewest steps possible.
 
@@ -141,8 +254,19 @@ Current Context: {context}
         time.sleep(1)
         return get_decision(user_query, context, available_files)
 
-# Main Agent Loop
-def ask_agent(user_query, files, max_steps=15):
+
+def ask_agent(user_query: str, files: list, max_steps: int = 15) -> dict:
+    """
+    Main agent loop to interact with the user and answer their query.
+
+    Args:
+        user_query (str): The question asked by the user.
+        files (list): List of available Python files.
+        max_steps (int): Max number of steps allowed.
+
+    Returns:
+        dict: Final answer and execution trace.
+    """
     context = ""
     seen_files = set()
     trace = []
@@ -182,8 +306,9 @@ Context:
                 print(f"Agent requested invalid or already-read file: {args}")
     return {"answer": "Reached max steps without a confident answer.", "trace": trace}
 
-# CLI Setup
+
 def main():
+    """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Codebase Query System")
     parser.add_argument('--path', type=str, required=True, help='Path to the code directory')
     parser.add_argument('--question', type=str, required=True, help='Question to ask about the codebase')
@@ -195,8 +320,9 @@ def main():
         index_codebase(args.path)
 
     result = ask_agent(args.question, files)
-    print("\n=== FINAL ANSWER ===\n", result["answer"])
-    print("\n=== AGENT TRACE ===\n", json.dumps(result["trace"], indent=2))
+    print("\nFinal Answer:\n", result["answer"])
+    print("\nExecution Trace:\n", result["trace"])
+
 
 if __name__ == "__main__":
     main()

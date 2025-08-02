@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 
+"""
+A chatbot application that uses PostgreSQL vector search to retrieve context,
+then feeds it into an LLM for answering questions about markdown content.
+
+This application connects to a PostgreSQL database with vector embeddings,
+retrieves relevant document chunks using approximate nearest neighbor search,
+and generates responses using Ollama's language models.
+"""
+
 import ollama
 import psycopg2
 import gradio as gr
@@ -37,6 +46,16 @@ conn = psycopg2.connect(
 cursor = conn.cursor()
 
 def retrieve_context(query, k=TOP_K):
+    """
+    Retrieve top-k relevant document chunks based on query embedding.
+    
+    Args:
+        query (str): User's question to find relevant context for.
+        k (int): Number of top matching chunks to return. Default is TOP_K.
+        
+    Returns:
+        list: List of strings representing relevant document chunks.
+    """
     query_embedding = client.embeddings(model=EMBEDD_MODEL, prompt=query)["embedding"]
 
     # Convert embedding list to PostgreSQL array format
@@ -53,6 +72,16 @@ def retrieve_context(query, k=TOP_K):
     return documents
 
 def get_last_conversation(history, pairs=3):
+    """
+    Extract recent conversation history from chat history.
+    
+    Args:
+        history (list): Full chat history as list of message dicts.
+        pairs (int): Maximum number of user-assistant pairs to extract.
+        
+    Returns:
+        list: List of tuples containing (user_message, assistant_response).
+    """
     conv = []
     i = len(history) - 1
     while i > 0 and len(conv) < pairs:
@@ -65,6 +94,16 @@ def get_last_conversation(history, pairs=3):
     return conv
 
 def get_answer(query, history):
+    """
+    Generate a response to the user's query using retrieved context and conversation history.
+    
+    Args:
+        query (str): The question posed by the user.
+        history (list): Full chat history as list of message dicts.
+        
+    Yields:
+        str: Partial responses as they are generated (streaming).
+    """
     context_chunks = retrieve_context(query)
     context_text = "\n".join(context_chunks)
     conversation_context = "\n".join([f"User: {u}\nAssistant: {a}" for u, a in get_last_conversation(history)])
@@ -90,6 +129,17 @@ Answer:
     return answer
 
 def respond(message, chat_history, history_state):
+    """
+    Handle user message submission and generate response.
+    
+    Args:
+        message (str): User's input message.
+        chat_history (list): Current conversation history.
+        history_state (list): Internal state to maintain conversation continuity.
+        
+    Yields:
+        tuple: Updated chat history, empty input field, updated history state.
+    """
     chat_history = chat_history or []
     response_gen = get_answer(message, chat_history)
     partial = ""
@@ -104,10 +154,26 @@ def respond(message, chat_history, history_state):
     yield chat_history, "", history_state
 
 def stop_chat(chat_history, history_state):
+    """
+    Clear input textbox and return current state to UI.
+    
+    Args:
+        chat_history (list): Current conversation history.
+        history_state (list): Internal state to maintain conversation continuity.
+        
+    Returns:
+        tuple: Updated chat history, empty input field, updated history state.
+    """
     # Clear the input textbox and return current state to UI
     return chat_history, "", history_state
 
 def background_reloader(interval_seconds=RELOAD_INTERVAL_SECONDS):
+    """
+    Periodically reload database connection in background thread to prevent timeouts.
+    
+    Args:
+        interval_seconds (int): Time interval between reload attempts. Default is RELOAD_INTERVAL_SECONDS.
+    """
     global cursor, conn
     while True:
         try:

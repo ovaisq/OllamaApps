@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+"""
+Markdown Chunk Indexer for Semantic Embeddings using Ollama and PostgreSQL.
+
+This script indexes Markdown files into chunks, computes semantic embeddings using
+Snowflake Arctic Embed (via Ollama), and stores them in a PostgreSQL database.
+It supports incremental indexing by checking existing chunk IDs to avoid duplication.
+
+Usage:
+    python indexer.py path/to/file.md
+"""
+
 import ollama
 import hashlib
 import os
@@ -34,31 +45,89 @@ conn = psycopg2.connect(
 )
 
 # --- Helpers ---
+
 def normalize_text(text):
-    """Clean text for consistent embeddings."""
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    """
+    Normalize text by collapsing multiple whitespace into single space and stripping.
+
+    Args:
+        text (str): Raw input text.
+
+    Returns:
+        str: Normalized string.
+    """
+    return re.sub(r'\s+', ' ', text).strip()
+
 
 def chunk_hash(text):
-    """Stable SHA256 hash for chunk IDs."""
+    """
+    Generate a stable SHA256 hash for chunk ID consistency.
+
+    Args:
+        text (str): Text to hash.
+
+    Returns:
+        str: Hex digest of the SHA256 hash.
+    """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+
 def read_markdown(file_path):
+    """
+    Read a Markdown file and return its content as a string.
+
+    Args:
+        file_path (str): Path to the markdown file.
+
+    Returns:
+        str: Content of the file.
+    """
     with open(file_path, "r", encoding="utf-8") as f:
         return f.read()
 
+
 def create_chunks(text):
+    """
+    Split text into overlapping chunks using RecursiveCharacterTextSplitter.
+
+    Args:
+        text (str): Input text to split.
+
+    Returns:
+        list[str]: List of chunked texts.
+    """
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     return splitter.split_text(text)
 
+
 def embed_text(chunk, title=None):
-    """Add context before embedding to improve semantic quality."""
+    """
+    Generate an embedding for a text chunk with optional title context.
+
+    Args:
+        chunk (str): The text chunk to embed.
+        title (str, optional): Title of the document; used for semantic enrichment.
+
+    Returns:
+        list[float]: Embedding vector from Ollama's model.
+    """
     enriched = f"Title: {title}\nContent: {chunk}" if title else chunk
     enriched = normalize_text(enriched)
     return client.embeddings(model="snowflake-arctic-embed", prompt=enriched)["embedding"]
 
+
 # --- Main Indexer ---
+
 def index_markdown(file_path):
+    """
+    Incrementally index a Markdown file into PostgreSQL using semantic embeddings.
+
+    This function reads the file, splits it into chunks, checks for existing IDs,
+    computes embeddings, and inserts new chunks only if they are not already present.
+
+    Args:
+        file_path (str): Path to the Markdown file.
+    """
     print(f"[INFO] Indexing file: {file_path}")
     text = read_markdown(file_path)
     chunks = create_chunks(text)
@@ -110,6 +179,7 @@ def index_markdown(file_path):
             print(f"[WARNING] Duplicate IDs still detected and skipped: {e}")
     else:
         print("[INFO] No new chunks to add. Index is up to date.")
+
 
 if __name__ == "__main__":
     import argparse
