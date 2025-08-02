@@ -1,4 +1,4 @@
-# Benefits of Keeping It Simple with Build Tooling Around Locally Hosted Ollama
+# Benefits of Keeping It Simple with Tooling Around Locally Hosted Ollama
 
 Keeping it simple with build tooling around locally hosted Ollama offers numerous advantages that enhance efficiency and user experience. By focusing on straightforward solutions like a Gradio-based single-page code review app or a chatbot using tools such as chromadb or PostgreSQL's pgvector, developers can significantly streamline their workflows. These apps provide intuitive interfaces that reduce complexity, enabling quick setup and easier maintenance.
 
