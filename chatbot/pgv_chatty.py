@@ -140,22 +140,32 @@ def respond(message, chat_history, history_state):
     Yields:
         tuple: Updated chat history, empty input field, updated history state.
     """
+    global stop_flag
+    stop_flag = False  # Reset stop flag for new request
+
     chat_history = chat_history or []
     response_gen = get_answer(message, chat_history)
     partial = ""
-    for chunk in response_gen:
-        partial = chunk
-        yield chat_history + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": partial}
-        ], "", history_state
-    chat_history.append({"role": "user", "content": message})
-    chat_history.append({"role": "assistant", "content": partial})
-    yield chat_history, "", history_state
+    try:
+        for chunk in response_gen:
+            if stop_flag:
+                break
+            partial = chunk
+            yield chat_history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": partial}
+            ], "", history_state
+    except Exception as e:
+        print(f"[ERROR] Streaming error: {e}")
+    finally:
+        # Final update after processing or interruption
+        chat_history.append({"role": "user", "content": message})
+        chat_history.append({"role": "assistant", "content": partial})
+        yield chat_history, "", history_state
 
 def stop_chat(chat_history, history_state):
     """
-    Clear input textbox and return current state to UI.
+    Stop ongoing chat generation and clear input textbox.
     
     Args:
         chat_history (list): Current conversation history.
@@ -164,7 +174,8 @@ def stop_chat(chat_history, history_state):
     Returns:
         tuple: Updated chat history, empty input field, updated history state.
     """
-    # Clear the input textbox and return current state to UI
+    global stop_flag
+    stop_flag = True  # Signal streaming to stop
     return chat_history, "", history_state
 
 def background_reloader(interval_seconds=RELOAD_INTERVAL_SECONDS):
@@ -209,4 +220,4 @@ with gr.Blocks(title="PGVECTOR: Markdown Chatbot", css='footer {display: none !i
     stop_btn.click(stop_chat, [chatbot, history_state], [chatbot, msg, history_state])
 
 if __name__ == "__main__":
-    chat.queue().launch(server_name='0.0.0.0')
+    chat.queue().launch(server_name='0.0.0.0', pwa=True)

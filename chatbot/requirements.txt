@@ -2,3 +2,4 @@ ollama
 gradio
 chromadb
 langchain
+psycopg2-binary

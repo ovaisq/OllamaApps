@@ -28,6 +28,7 @@ cp deployment.yaml.orig deployment.yaml
 # Read config
 source config_vals.txt
 export DOCKER_HOST=ssh://ovais@jenkins-node-1
+SEMVER=$(<ver.txt)
 
 # Call the functions with the version as an argument
 build_docker $SEMVER
