@@ -21,6 +21,7 @@ import queue
 from concurrent.futures import ThreadPoolExecutor
 
 # ===== CONFIG =====
+OLLAMA_HOST = 'http://'
 CHAT_MODEL = 'phi4-mini'
 EMBEDD_MODEL = 'snowflake-arctic-embed'
 DB_NAME = ""
@@ -35,7 +36,7 @@ RELOAD_INTERVAL_SECONDS = 30  # seconds
 
 logging.getLogger("psycopg2").setLevel(logging.ERROR)
 
-client = ollama.Client(host="http://")
+client = ollama.Client(host=OLLAMA_HOST)
 
 # Connect to PostgreSQL database
 conn = psycopg2.connect(
