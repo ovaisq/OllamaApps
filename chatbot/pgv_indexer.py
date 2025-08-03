@@ -20,7 +20,7 @@ import psycopg2
 from psycopg2.extras import Json
 
 # ===== CONFIG =====
-OLLAMA_HOST = "http://"
+OLLAMA_HOST = "http://"  # Example default Ollama host
 CHUNK_SIZE = 800      # ~500-800 tokens recommended
 CHUNK_OVERLAP = 100   # Overlap for context
 
@@ -124,34 +124,33 @@ def index_markdown(file_path):
 
     This function reads the file, splits it into chunks, checks for existing IDs,
     computes embeddings, and inserts new chunks only if they are not already present.
-
-    Args:
-        file_path (str): Path to the Markdown file.
+    Uses both chunk hash and full text comparison to detect duplicates.
     """
     print(f"[INFO] Indexing file: {file_path}")
     text = read_markdown(file_path)
     chunks = create_chunks(text)
 
-    # Fetch ALL existing IDs
+    # Fetch ALL existing IDs and their content hashes (to compare against)
     cursor = conn.cursor()
     cursor.execute("SELECT id, chunk FROM markdown_chunks")
     existing_data = cursor.fetchall()
 
-    existing_ids = set(chunk_hash(row[1]) for row in existing_data)
+    # Store all existing chunk contents as a set of normalized strings for fast lookup
+    existing_chunks = {normalize_text(row[1]) for row in existing_data}
 
     new_chunks = []
     new_embeddings = []
     new_metadata = []
 
     for chunk in chunks:
-        cid = chunk_hash(chunk)
-        if cid not in existing_ids:
+        norm_chunk = normalize_text(chunk)
+        if norm_chunk not in existing_chunks:
             embedding = embed_text(chunk, title=os.path.basename(file_path))
-            new_chunks.append(normalize_text(chunk))
+            new_chunks.append(norm_chunk)
             new_embeddings.append(embedding)
             new_metadata.append(Json({"source": os.path.basename(file_path)}))
 
-    # Deduplicate in case of unexpected collision within current batch
+    # Deduplicate within current batch
     unique_data = {}
     for i, chunk in enumerate(new_chunks):
         cid = chunk_hash(chunk)
