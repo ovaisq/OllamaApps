@@ -17,6 +17,8 @@ import time
 import logging
 import uuid
 from psycopg2.extras import Json
+import queue
+from concurrent.futures import ThreadPoolExecutor
 
 # ===== CONFIG =====
 CHAT_MODEL = 'phi4-mini'
@@ -44,6 +46,9 @@ conn = psycopg2.connect(
     port=DB_PORT
 )
 cursor = conn.cursor()
+
+# Global flag for stopping generation
+stop_flag = threading.Event()
 
 def retrieve_context(query, k=TOP_K):
     """
@@ -93,14 +98,10 @@ def get_last_conversation(history, pairs=3):
     conv.reverse()  # chronological order
     return conv
 
-def get_answer(query, history):
+def get_answer_streaming(query, history):
     """
-    Generate a response to the user's query using retrieved context and conversation history.
+    Generate a streaming response using Ollama's chat API.
     
-    Args:
-        query (str): The question posed by the user.
-        history (list): Full chat history as list of message dicts.
-        
     Yields:
         str: Partial responses as they are generated (streaming).
     """
@@ -123,32 +124,26 @@ Answer:
     stream = client.chat(model=CHAT_MODEL, options=dict(num_ctx=8192), messages=[{"role": "user", "content": prompt}], stream=True)
     answer = ""
     for chunk in stream:
+        if stop_flag.is_set():
+            break
         token = chunk.get("message", {}).get("content", "")
         answer += token
         yield answer
-    return answer
 
 def respond(message, chat_history, history_state):
     """
     Handle user message submission and generate response.
-    
-    Args:
-        message (str): User's input message.
-        chat_history (list): Current conversation history.
-        history_state (list): Internal state to maintain conversation continuity.
-        
-    Yields:
-        tuple: Updated chat history, empty input field, updated history state.
     """
     global stop_flag
-    stop_flag = False  # Reset stop flag for new request
+    stop_flag.clear()  # Reset the stop flag before starting a new generation
 
     chat_history = chat_history or []
-    response_gen = get_answer(message, chat_history)
+    response_gen = get_answer_streaming(message, chat_history)
     partial = ""
+    
     try:
         for chunk in response_gen:
-            if stop_flag:
+            if stop_flag.is_set():
                 break
             partial = chunk
             yield chat_history + [
@@ -166,16 +161,9 @@ def respond(message, chat_history, history_state):
 def stop_chat(chat_history, history_state):
     """
     Stop ongoing chat generation and clear input textbox.
-    
-    Args:
-        chat_history (list): Current conversation history.
-        history_state (list): Internal state to maintain conversation continuity.
-        
-    Returns:
-        tuple: Updated chat history, empty input field, updated history state.
     """
     global stop_flag
-    stop_flag = True  # Signal streaming to stop
+    stop_flag.set()  # Signal streaming to stop
     return chat_history, "", history_state
 
 def background_reloader(interval_seconds=RELOAD_INTERVAL_SECONDS):
