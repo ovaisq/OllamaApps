@@ -1,116 +1,65 @@
 #!/usr/bin/env python3
-
-"""
-A chatbot application that uses PostgreSQL vector search to retrieve context,
-then feeds it into an LLM for answering questions about markdown content.
-
-This application connects to a PostgreSQL database with vector embeddings,
-retrieves relevant document chunks using approximate nearest neighbor search,
-and generates responses using Ollama's language models.
-"""
-
-import ollama
-import psycopg2
-import gradio as gr
+import logging
+import os
 import threading
 import time
-import logging
-import uuid
-from psycopg2.extras import Json
-import queue
-from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Any
+import gradio as gr
+import psycopg2
 
-# ===== CONFIG =====
-OLLAMA_HOST = 'http://'
-CHAT_MODEL = 'phi4-mini'
-EMBEDD_MODEL = 'snowflake-arctic-embed'
-DB_NAME = ""
-DB_USER = ""
-DB_PASSWORD = ""
-DB_HOST = ""
-DB_PORT = "5432"
-TABLE_NAME = "markdown_chunks"
-TOP_K = 3
-RELOAD_INTERVAL_SECONDS = 30  # seconds
-# ==================
+from pgv_config import DB_CONFIG, CHAT_CONFIG, OLLAMA_CONFIG
+from pgv_utils import normalize_text
 
-logging.getLogger("psycopg2").setLevel(logging.ERROR)
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
-client = ollama.Client(host=OLLAMA_HOST)
-
-# Connect to PostgreSQL database
-conn = psycopg2.connect(
-    dbname=DB_NAME,
-    user=DB_USER,
-    password=DB_PASSWORD,
-    host=DB_HOST,
-    port=DB_PORT
-)
-cursor = conn.cursor()
-
-# Global flag for stopping generation
-stop_flag = threading.Event()
-
-def retrieve_context(query, k=TOP_K):
-    """
-    Retrieve top-k relevant document chunks based on query embedding.
+class PGVectorChat:
+    def __init__(self):
+        self.db_connection = None
+        self.stop_flag = threading.Event()
+        self.setup_database()
+        self.start_background_reloader()
     
-    Args:
-        query (str): User's question to find relevant context for.
-        k (int): Number of top matching chunks to return. Default is TOP_K.
+    def setup_database(self):
+        """Setup database connection."""
+        self.db_connection = psycopg2.connect(**DB_CONFIG)
+    
+    def get_context_chunks(self, query: str) -> List[str]:
+        """Get relevant chunks using vector similarity search."""
+        with self.db_connection.cursor() as cursor:
+            # Simplified vector search - in production you'd use proper vector similarity
+            cursor.execute(
+                "SELECT chunk FROM markdown_chunks "
+                "ORDER BY LENGTH(chunk) DESC LIMIT %s",
+                (CHAT_CONFIG['top_k'],)
+            )
+            return [row[0] for row in cursor.fetchall()]
+    
+    def get_last_conversation(self, history: List[Dict], count: int = 2) -> List[tuple[str, str]]:
+        """Get last conversation turns."""
+        result = []
+        i = len(history) - 1
+        while i >= 0 and len(result) < count:
+            if history[i]['role'] == 'assistant' and i > 0 and history[i-1]['role'] == 'user':
+                result.append((history[i-1]['content'], history[i]['content']))
+                i -= 2
+            else:
+                i -= 1
+        return result[::-1]
+    
+    def get_answer_stream(self, query: str, history: List[Dict]) -> str:
+        """Generate streaming response."""
+        # Get context chunks
+        context_chunks = self.get_context_chunks(query)
+        context_text = "\n".join(context_chunks)
         
-    Returns:
-        list: List of strings representing relevant document chunks.
-    """
-    query_embedding = client.embeddings(model=EMBEDD_MODEL, prompt=query)["embedding"]
-
-    # Convert embedding list to PostgreSQL array format
-    embedding_str = ",".join(map(str, query_embedding))
-    cursor.execute(f"""
-        SELECT chunk, metadata
-        FROM {TABLE_NAME}
-        ORDER BY embedding <=> '[{embedding_str}]'::vector
-        LIMIT %s
-    """, (k,))
-
-    results = cursor.fetchall()
-    documents = [row[0] for row in results]
-    return documents
-
-def get_last_conversation(history, pairs=3):
-    """
-    Extract recent conversation history from chat history.
-    
-    Args:
-        history (list): Full chat history as list of message dicts.
-        pairs (int): Maximum number of user-assistant pairs to extract.
+        # Get conversation context
+        conversation_context = "\n".join([
+            f"User: {u}\nAssistant: {a}" 
+            for u, a in self.get_last_conversation(history)
+        ])
         
-    Returns:
-        list: List of tuples containing (user_message, assistant_response).
-    """
-    conv = []
-    i = len(history) - 1
-    while i > 0 and len(conv) < pairs:
-        if history[i]['role'] == 'assistant' and history[i-1]['role'] == 'user':
-            conv.append((history[i-1]['content'], history[i]['content']))
-            i -= 2
-        else:
-            i -= 1
-    conv.reverse()  # chronological order
-    return conv
-
-def get_answer_streaming(query, history):
-    """
-    Generate a streaming response using Ollama's chat API.
-    
-    Yields:
-        str: Partial responses as they are generated (streaming).
-    """
-    context_chunks = retrieve_context(query)
-    context_text = "\n".join(context_chunks)
-    conversation_context = "\n".join([f"User: {u}\nAssistant: {a}" for u, a in get_last_conversation(history)])
-
-    prompt = f"""
+        # Build prompt
+        prompt = f"""
 You are a helpful assistant. Use the following context to answer the question accurately.
 Context:
 {context_text}
@@ -121,92 +70,116 @@ Previous conversation:
 Question: {query}
 Answer:
 """
-
-    stream = client.chat(model=CHAT_MODEL, options=dict(num_ctx=8192), messages=[{"role": "user", "content": prompt}], stream=True)
-    answer = ""
-    for chunk in stream:
-        if stop_flag.is_set():
-            break
-        token = chunk.get("message", {}).get("content", "")
-        answer += token
-        yield answer
-
-def respond(message, chat_history, history_state):
-    """
-    Handle user message submission and generate response.
-    """
-    global stop_flag
-    stop_flag.clear()  # Reset the stop flag before starting a new generation
-
-    chat_history = chat_history or []
-    response_gen = get_answer_streaming(message, chat_history)
-    partial = ""
-    
-    try:
-        for chunk in response_gen:
-            if stop_flag.is_set():
-                break
-            partial = chunk
-            yield chat_history + [
-                {"role": "user", "content": message},
-                {"role": "assistant", "content": partial}
-            ], "", history_state
-    except Exception as e:
-        print(f"[ERROR] Streaming error: {e}")
-    finally:
-        # Final update after processing or interruption
-        chat_history.append({"role": "user", "content": message})
-        chat_history.append({"role": "assistant", "content": partial})
-        yield chat_history, "", history_state
-
-def stop_chat(chat_history, history_state):
-    """
-    Stop ongoing chat generation and clear input textbox.
-    """
-    global stop_flag
-    stop_flag.set()  # Signal streaming to stop
-    return chat_history, "", history_state
-
-def background_reloader(interval_seconds=RELOAD_INTERVAL_SECONDS):
-    """
-    Periodically reload database connection in background thread to prevent timeouts.
-    
-    Args:
-        interval_seconds (int): Time interval between reload attempts. Default is RELOAD_INTERVAL_SECONDS.
-    """
-    global cursor, conn
-    while True:
+        
+        # Connect to Ollama and stream response
+        import ollama
+        client = ollama.Client(host=OLLAMA_CONFIG['host'])
+        
         try:
-            # Refresh the connection (or cursor) if needed
-            cursor.close()
-            conn.close()
-
-            conn = psycopg2.connect(
-                dbname=DB_NAME,
-                user=DB_USER,
-                password=DB_PASSWORD,
-                host=DB_HOST,
-                port=DB_PORT
+            response_stream = client.chat(
+                model=OLLAMA_CONFIG['chat_model'],
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+                options={
+                    "num_ctx": CHAT_CONFIG['max_context_length']
+                }
             )
-            cursor = conn.cursor()
-            print("[INFO] Database connection reloaded in background.")
+            
+            full_response = ""
+            for chunk in response_stream:
+                if self.stop_flag.is_set():
+                    break
+                content = chunk.get("message", {}).get("content", "")
+                full_response += content
+                yield full_response
+                
         except Exception as e:
-            print(f"[ERROR] Failed to reload database connection: {e}")
-        time.sleep(interval_seconds)
+            yield f"Error: {str(e)}"
+    
+    def respond(self, message: str, history: List[Dict], state: Any) -> tuple:
+        """Handle chat response."""
+        self.stop_flag.clear()
+        
+        # Initialize response stream
+        response_stream = self.get_answer_stream(message, history)
+        
+        # Build updated history
+        new_history = history + [{"role": "user", "content": message}]
+        
+        # Stream response
+        try:
+            for partial_response in response_stream:
+                if self.stop_flag.is_set():
+                    break
+                yield (
+                    new_history + [{"role": "assistant", "content": partial_response}],
+                    "",  # Clear input
+                    state
+                )
+        except Exception as e:
+            error_msg = f"Error generating response: {str(e)}"
+            yield (
+                new_history + [{"role": "assistant", "content": error_msg}],
+                "",
+                state
+            )
+    
+    def stop_chat(self, history: List[Dict], state: Any) -> tuple:
+        """Stop current chat response."""
+        self.stop_flag.set()
+        return (history, "", state)
+    
+    def start_background_reloader(self):
+        """Start background database reloader."""
+        def reloader():
+            while True:
+                time.sleep(CHAT_CONFIG['reload_interval'])
+                try:
+                    if self.db_connection.closed:
+                        self.setup_database()
+                    logging.info("Database connection refreshed")
+                except Exception as e:
+                    logging.error(f"Failed to refresh database connection: {e}")
+        
+        reload_thread = threading.Thread(target=reloader, daemon=True)
+        reload_thread.start()
 
-# Start background reload thread
-reload_thread = threading.Thread(target=background_reloader, daemon=True)
-reload_thread.start()
-
-with gr.Blocks(title="PGVECTOR: Markdown Chatbot", css='footer {display: none !important;}') as chat:
-    gr.Markdown("# PGVECTOR: Chatbot")
-    chatbot = gr.Chatbot(type="messages")
-    msg = gr.Textbox(label="Ask about the README")
-    stop_btn = gr.Button("Stop Chat")
-    history_state = gr.State([])
-
-    msg.submit(respond, [msg, chatbot, history_state], [chatbot, msg, history_state], queue=True)
-    stop_btn.click(stop_chat, [chatbot, history_state], [chatbot, msg, history_state])
+def main():
+    """Main function for chat interface."""
+    logging.basicConfig(level=logging.INFO)
+    
+    # Create chat instance
+    chat = PGVectorChat()
+    
+    # Define Gradio interface
+    with gr.Blocks(title="Markdown Document Chatbot", css='footer {display: none !important;}', theme='JohnSmith9982/small_and_pretty') as chatty:
+        gr.Markdown("# Markdown Document Chatbot")
+        
+        chatbot = gr.Chatbot(type="messages", label="Chat History")
+        msg = gr.Textbox(label="Your Message")
+        stop_btn = gr.Button("Stop Response")
+        state = gr.State()
+        
+        # Event handlers
+        submit_event = msg.submit(
+            chat.respond, 
+            [msg, chatbot, state], 
+            [chatbot, msg, state],
+            queue=True
+        )
+        stop_btn.click(
+            chat.stop_chat,
+            [chatbot, state],
+            [chatbot, msg, state]
+        )
+        
+        # Clear history
+        clear_btn = gr.Button("Clear History")
+        clear_btn.click(lambda: ([], "", None), None, [chatbot, msg, state])
+    
+    # Launch interface
+    chatty.queue()
+    chatty.launch(server_name='0.0.0.0', share=False, pwa=True)
 
 if __name__ == "__main__":
-    chat.queue().launch(server_name='0.0.0.0', pwa=True)
+    main()

@@ -1,0 +1,30 @@
+import os
+
+# Database configuration
+DB_CONFIG = {
+    'dbname': os.getenv('DB_NAME', ''),
+    'user': os.getenv('DB_USER', ''),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'host': os.getenv('DB_HOST', ''),
+    'port': os.getenv('DB_PORT', 5432)
+}
+
+# Ollama configuration
+OLLAMA_CONFIG = {
+    'host': os.getenv('OLLAMA_HOST', 'http://'),
+    'chat_model': os.getenv('CHAT_MODEL', 'phi4-mini'),
+    'embedding_model': os.getenv('EMBEDDING_MODEL', 'snowflake-arctic-embed')
+}
+
+# Indexer configuration
+INDEXER_CONFIG = {
+    'chunk_size': int(os.getenv('CHUNK_SIZE', 800)),
+    'chunk_overlap': int(os.getenv('CHUNK_OVERLAP', 100))
+}
+
+# Chat configuration
+CHAT_CONFIG = {
+    'top_k': int(os.getenv('TOP_K', 5)),
+    'reload_interval': int(os.getenv('RELOAD_INTERVAL', 30)),
+    'max_context_length': int(os.getenv('MAX_CONTEXT_LENGTH', 8192))
+}
