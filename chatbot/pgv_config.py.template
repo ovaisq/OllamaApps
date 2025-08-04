@@ -24,7 +24,8 @@ INDEXER_CONFIG = {
 
 # Chat configuration
 CHAT_CONFIG = {
-    'top_k': int(os.getenv('TOP_K', 5)),
+    'top_k': int(os.getenv('TOP_K', 10)),
+	'top_p': float(os.getenv('TOP_P', 0.9)),
     'reload_interval': int(os.getenv('RELOAD_INTERVAL', 30)),
     'max_context_length': int(os.getenv('MAX_CONTEXT_LENGTH', 8192))
 }
