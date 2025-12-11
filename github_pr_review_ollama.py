@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 # GitHub PR Code Reviewer using Ollama
-# Author: @your-github-username (replace with actual GitHub username)
 # This script reviews GitHub pull requests using Ollama's large language models
 # to provide code review feedback directly as PR comments.
 #
