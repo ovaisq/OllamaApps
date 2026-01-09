@@ -633,7 +633,7 @@ custom_css = """
 """
 
 # Define Gradio UI with modern styling (Gradio 6.0 compatible)
-with gr.Blocks() as ui:
+with gr.Blocks(title="Ollama Web Assistant") as ui:
     # System status message
     status_parts = []
     if not ollama_available:
