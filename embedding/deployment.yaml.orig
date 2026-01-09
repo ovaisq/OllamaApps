@@ -5,7 +5,7 @@ metadata:
   labels:
     app: summarize-web-pages
     environment: production
-    version: 2.0.0
+    version: SEMVER
 spec:
   replicas: 1
   selector:
@@ -15,11 +15,11 @@ spec:
     metadata:
       labels:
         app: summarize-web-pages
-        version: 2.0.0
+        version: SEMVER
     spec:
       containers:
       - name: summarize-web-pages
-        image: jenkins-node-1:5000/summarize-web-pages:2.0.0
+        image: jenkins-node-1:5000/summarize-web-pages:SEMVER
         imagePullPolicy: Always
         ports:
         - containerPort: 7860

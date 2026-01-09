@@ -108,7 +108,7 @@ password = CONFIG.get('psqldb', 'password')
 port = CONFIG.get('psqldb', 'port')
 
 OLLAMA_HOST = CONFIG.get('ai', 'OLLAMA_HOST')
-LLM = CONFIG.get('ai', 'LLM') or "llama3.2"
+LLM = CONFIG.get('ai', 'LLM') or "phi4"
 EMBED_MODEL = "nomic-embed-text"
 
 SERVICE_VERSION = CONFIG.get('service', 'version')
@@ -382,7 +382,7 @@ def query_documents(url_list: List[str], query: str) -> str:
 def get_trend_summary():
 
     if not (ollama_available and langchain_available):
-        return "⚠️ Trending topics unavailable (langchain packages need update)"
+        return "Trending topics unavailable (langchain packages need update)"
 
     try:
         # Define prompt template
@@ -396,7 +396,7 @@ def get_trend_summary():
         my_context = get_keyphrase_trends()
 
         if not my_context:
-            return "📊 No trending data available yet. Start querying to build trends!"
+            return "No trending data available yet. Start querying to build trends!"
 
         # Initialize the model
         model = ChatOllama(model=LLM, temperature=0.7)
@@ -410,7 +410,7 @@ def get_trend_summary():
         return model_result.content if hasattr(model_result, "content") else "No content available."
     except Exception as e:
         print(f"Error querying documents: {e}\n{traceback.format_exc()}")
-        return "⚠️ An error occurred while getting trends."
+        return "An error occurred while getting trends."
 
 def process_input(urls_str: str, q_n_i: str):
     """Processes the input URLs and query to generate a response."""
@@ -419,7 +419,7 @@ def process_input(urls_str: str, q_n_i: str):
 
     urls_list = urls_str.strip().split("\n")
     if not urls_list or not q_n_i.strip():
-        return "⚠️ Please provide both URL(s) and a query.", "", ""
+        return "Please provide both URL(s) and a query.", "", ""
 
     json_doc = ''
 
@@ -637,35 +637,35 @@ with gr.Blocks() as ui:
     # System status message
     status_parts = []
     if not ollama_available:
-        status_parts.append("⚠️ langchain-ollama unavailable")
+        status_parts.append("langchain-ollama unavailable")
     if not langchain_available:
-        status_parts.append("⚠️ langchain unavailable")
+        status_parts.append("langchain unavailable")
     if python_version.major == 3 and python_version.minor >= 14:
-        status_parts.append(f"⚠️ Python {python_version.major}.{python_version.minor} - compatibility issues possible")
+        status_parts.append(f"Python {python_version.major}.{python_version.minor} - compatibility issues possible")
 
     if status_parts:
         gr.Markdown(f"### System Status\n{' | '.join(status_parts)}\n\n**Recommended:** Use Python 3.11 or 3.12 and run:\n```\npip install --upgrade langchain-ollama langchain-core langchain-community\n```")
 
-    gr.Markdown("# 🚀 Ollama Web Assistant")
-    gr.Markdown("### 📊 Trending Topics")
+    gr.Markdown("# Ollama Web Assistant")
+    gr.Markdown("### Trending Topics")
 
     with gr.Row():
         # Removed show_copy_button parameter (not available in Gradio 6.0 for Markdown)
         trends = gr.Markdown(label="Current Trends", elem_id='trends-box', every=15)
     ui.load(get_trend_summary, inputs=None, outputs=trends)
 
-    gr.Markdown("### 🔍 Query Interface")
+    gr.Markdown("### Query Interface")
 
     with gr.Row():
         with gr.Column(scale=1):
             urls = gr.Textbox(
-                label="📎 Enter URL(s)",
+                label="Enter URL(s)",
                 placeholder="https://example.com\nhttps://another-example.com",
                 lines=3
             )
         with gr.Column(scale=2):
             q_n_a = gr.Textbox(
-                label="❓ Ask a question or provide an instruction",
+                label="Ask a question or provide an instruction",
                 placeholder="What are the key insights from these documents?",
                 lines=3
             )
@@ -673,7 +673,7 @@ with gr.Blocks() as ui:
     with gr.Row():
         submit_button = gr.Button("🔄 Process Query", variant="primary")
 
-    gr.Markdown("### 📋 Results")
+    gr.Markdown("### Results")
 
     with gr.Row():
         with gr.Column():
@@ -686,14 +686,14 @@ with gr.Blocks() as ui:
             keywords = gr.Markdown(
                 "Keywords will appear here...",
                 elem_id="keywords-box",
-                label="🔑 Topic Keywords"
+                label="Topic Keywords"
             )
 
     with gr.Row():
         html_list = gr.Markdown(
             "Web results will appear here...",
             elem_id="web-box",
-            label="🌐 Related Web Content"
+            label="Related Web Content"
         )
 
     submit_button.click(
@@ -707,14 +707,14 @@ with gr.Blocks() as ui:
         <div style='text-align: center; margin-top: 2rem; padding: 1rem;
                     background: var(--glass-bg); border: 1px solid var(--glass-border);
                     border-radius: 8px; color: var(--text-muted);'>
-            <b>🤖 LLM</b>: {LLM} | <b>📊 Embeddings</b>: {EMBED_MODEL} | <b>📌 Version</b>: {SERVICE_VERSION} | <b>🐍 Python</b>: {python_version.major}.{python_version.minor}
+            <b>LLM</b>: {LLM} | <b>Embeddings</b>: {EMBED_MODEL} | <b>Version</b>: {SERVICE_VERSION} | <b>Python</b>: {python_version.major}.{python_version.minor}
         </div>
         """
     )
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("🚀 Starting Ollama Web Assistant")
+    print("Starting Ollama Web Assistant")
     print("="*60)
     print(f"Python Version: {python_version.major}.{python_version.minor}.{python_version.micro}")
     print(f"LangChain Available: {langchain_available}")
