@@ -630,6 +630,7 @@ custom_css = """
         padding: 1rem !important;
         border-radius: 8px !important;
     }
+    footer {display: none !important;}
 """
 
 # Define Gradio UI with modern styling (Gradio 6.0 compatible)
