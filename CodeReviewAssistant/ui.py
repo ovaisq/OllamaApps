@@ -248,4 +248,7 @@ class AppUI:
 
 if __name__ == "__main__":
     app = AppUI()
-    app.create_interface().launch(server_name="0.0.0.0", server_port=7860,theme=gr.themes.Default(primary_hue="blue"))
+    app.create_interface().launch(server_name="0.0.0.0",
+                                  server_port=7860,
+                                  theme=gr.themes.Default(primary_hue="blue"),
+                                  pwa=True)
