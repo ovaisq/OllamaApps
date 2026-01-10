@@ -18,7 +18,7 @@ push_image() {
 
 apply_kubernetes() {
 
-  #cp deployment.yaml.orig deployment.yaml
+  cp deployment.yaml.orig deployment.yaml
   sed -i "s|SEMVER|$SEMVER|" deployment.yaml
   sed -i "s|DOCKER_HOST_URI|$DOCKER_HOST_URI|" deployment.yaml
   kubectl -n cicd apply -f deployment.yaml
