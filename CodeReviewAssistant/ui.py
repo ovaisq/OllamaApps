@@ -195,7 +195,7 @@ class AppUI:
         self.is_cancelled = True
 
     def create_interface(self):
-        with gr.Blocks(analytics_enabled=False) as ui:
+        with gr.Blocks(analytics_enabled=False, title="Ollama Code Review Assistant") as ui:
             gr.Markdown("# Ollama Code Review Assistant")
 
             with gr.Row():
