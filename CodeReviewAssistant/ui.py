@@ -1,81 +1,120 @@
 #!/usr/bin/env python3
 """
-Ollama Code Review Assistant
+Ollama Code Review Assistant - Professional Edition
 """
 
 import asyncio
 import re
 import tempfile
+import logging
+import shutil
+import os
+import atexit
+import uuid
 from pathlib import Path
 from typing import List, Optional, Tuple, AsyncGenerator
 
 import gradio as gr
 import ollama
 
-# --- Configuration & Constants ---
-DEFAULT_HOST = "http://192.168.3.16"
+# --- Configuration & Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+DEFAULT_HOST = os.getenv("OLLAMA_HOST", "http://192.168.3.16")
 DEFAULT_MODEL = "llama3.2"
-TEMP_DIR_PREFIX = "ollama_review_"
+MAX_FILE_SIZE_MB = 5  # Safety limit
 
 # --- Business Logic: Ollama Service ---
 
 class OllamaService:
-    """Handles communications with the Ollama API."""
+    """Handles communications with the Ollama API with connection pooling."""
 
     def __init__(self, host: str):
-        # Clean host string to prevent protocol/formatting errors
+        self.host = self._sanitize_host(host)
+        self._client: Optional[ollama.AsyncClient] = None
+
+    @property
+    def client(self) -> ollama.AsyncClient:
+        if self._client is None:
+            self._client = ollama.AsyncClient(host=self.host)
+        return self._client
+
+    @staticmethod
+    def _sanitize_host(host: str) -> str:
         host = host.strip().rstrip('/')
         if host and not host.startswith(('http://', 'https://')):
-            host = f"http://{host}"
-        self.host = host or DEFAULT_HOST
+            return f"http://{host}"
+        return host or "http://localhost:11434"
 
     async def get_models(self) -> List[str]:
-        """Fetches available models using a fresh client instance."""
         try:
-            client = ollama.AsyncClient(host=self.host)
-            response = await client.list()
+            response = await self.client.list()
             return sorted([m.model for m in response.models])
         except Exception as e:
-            print(f"Model fetch error: {e}")
+            logger.error(f"Failed to fetch models: {e}")
             return []
 
     async def generate_review(
         self,
         model: str,
-        prompt: str,
+        system_prompt: str,
+        user_prompt: str,
         code_context: str
     ) -> AsyncGenerator[str, None]:
-        """Streams the AI response using a fresh client instance."""
-        full_prompt = f"# Request\n{prompt}\n\n# Files\n{code_context}"
+        full_user_content = f"# User Request\n{user_prompt}\n\n# Code Context\n{code_context}"
 
         try:
-            client = ollama.AsyncClient(host=self.host)
-            message = {'role': 'user', 'content': full_prompt}
-            async for part in await client.chat(
+            stream = await self.client.chat(
                 model=model,
-                messages=[message],
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': full_user_content}
+                ],
                 stream=True,
-                options=dict(num_ctx=8192, temperature=0.7)
-            ):
+                options=dict(num_ctx=16384, temperature=0.2) # Lower temp for code tasks
+            )
+
+            async for part in stream:
                 yield part['message']['content']
+
         except Exception as e:
-            yield f"**API Error**: {str(e)}"
+            logger.error(f"Generation error: {e}")
+            yield f"\n\n**Error**: {str(e)}"
 
 # --- Business Logic: File Processing ---
 
 class FileProcessor:
     """Handles reading source files and extracting refactored code."""
 
-    @staticmethod
-    def read_files(file_objects: List) -> Tuple[str, List[str]]:
+    def __init__(self):
+        # Create a unique session directory
+        self.session_id = str(uuid.uuid4())[:8]
+        self.temp_dir = Path(tempfile.gettempdir()) / f"ollama_review_{self.session_id}"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        atexit.register(self.cleanup)
+
+    def cleanup(self):
+        """Removes temporary files on exit."""
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir)
+
+    def read_files(self, file_objects: List) -> Tuple[str, List[str]]:
         if not file_objects:
             return "", []
 
         content_blocks = []
-        file_list = file_objects if isinstance(file_objects, list) else [file_objects]
+        filenames = []
 
-        for file_obj in file_list:
+        for file_obj in file_objects:
             path = Path(file_obj.name)
+
+            # Security/Performance check
+            if path.stat().st_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                content_blocks.append(f"### File: {path.name}\n*Skipped: File too large (> {MAX_FILE_SIZE_MB}MB)*")
+                continue
+
+            filenames.append(path.name)
             try:
                 code = path.read_text(encoding='utf-8', errors='replace')
                 lang = path.suffix[1:] or "text"
@@ -83,148 +122,130 @@ class FileProcessor:
             except Exception as e:
                 content_blocks.append(f"### File: {path.name}\n*Error reading file: {e}*")
 
-        return "\n\n".join(content_blocks), [Path(f.name).name for f in file_list]
+        return "\n\n".join(content_blocks), filenames
 
-    @staticmethod
-    def extract_and_save_code(text: str, original_filenames: List[str]) -> List[str]:
-        """Extracts code blocks and saves them to a temp directory for download."""
-        output_dir = Path(tempfile.gettempdir()) / "ollama_refactored"
-        output_dir.mkdir(exist_ok=True)
-
-        # Pattern to find code blocks with optional filenames/languages
-        pattern = re.compile(r'```(?:\w+)?(?::([\w\.\-\/]+))?\n(.*?)\n```', re.DOTALL)
+    def extract_and_save_code(self, text: str, original_filenames: List[str]) -> List[str]:
+        # Improved Regex: Handles ```python:path/to/file.py or ```python
+        pattern = re.compile(r'```(?:\w+)?(?::?([\w\.\-\/]+))?\n(.*?)\n```', re.DOTALL)
         matches = pattern.findall(text)
 
         saved_paths = []
-        for i, (filename_hint, code) in enumerate(matches):
-            # Determine filename: 1. Hint in markdown 2. Original filename 3. Default
-            if filename_hint:
-                fname = Path(filename_hint).name
+        for i, (hint, code) in enumerate(matches):
+            if hint:
+                fname = Path(hint).name
             elif i < len(original_filenames):
                 fname = f"refactored_{original_filenames[i]}"
             else:
-                fname = f"refactored_block_{i+1}.txt"
+                fname = f"suggested_fix_{i+1}.py"
 
-            out_path = output_dir / fname
-            out_path.write_text(code.strip(), encoding='utf-8')
-            saved_paths.append(str(out_path))
+            try:
+                out_path = self.temp_dir / fname
+                out_path.write_text(code.strip(), encoding='utf-8')
+                saved_paths.append(str(out_path))
+            except Exception as e:
+                logger.error(f"Save error: {e}")
 
         return saved_paths
 
-# --- UI Components & Styling ---
-
-CUSTOM_CSS = """
-.container { max-width: 1200px; margin: auto; }
-.model-box {
-    max-height: 150px;
-    overflow-y: auto;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 5px;
-}
-.results-area {
-    min-height: 500px;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 15px;
-}
-footer { display: none !important; }
-"""
+# --- UI Components ---
 
 class AppUI:
     def __init__(self):
         self.service = OllamaService(DEFAULT_HOST)
+        self.processor = FileProcessor()
         self.is_cancelled = False
 
     async def handle_refresh(self, host: str):
         self.service = OllamaService(host)
         models = await self.service.get_models()
         if not models:
-            return gr.update(choices=[], value=None), "No models found. Check URL."
-        return gr.update(choices=models, value=models[0]), f"Found {len(models)} models."
+            return gr.update(choices=[], value=None), "⚠️ No models found. Check connection."
+        return gr.update(choices=models, value=models[0] if models else None), "✅ Connected"
 
-    async def handle_submit(self, host: str, model: str, prompt: str, files: List):
+    async def handle_submit(self, host: str, model: str, sys_prompt: str, user_prompt: str, files: List):
         self.is_cancelled = False
         if not model or not files:
             yield "Please select a model and upload files.", None
             return
 
-        # 1. Prepare files
-        code_context, original_names = FileProcessor.read_files(files)
+        self.service = OllamaService(host)
+        code_context, original_names = self.processor.read_files(files)
 
-        # 2. Stream AI Response
         full_response = ""
-        async for chunk in self.service.generate_review(model, prompt, code_context):
+        yield "🚀 Analyzing code...", None
+
+        async for chunk in self.service.generate_review(model, sys_prompt, user_prompt, code_context):
             if self.is_cancelled:
-                full_response += "\n\n *Process cancelled by user.*"
+                full_response += "\n\n🛑 *Stopped by user.*"
                 yield full_response, None
                 return
 
             full_response += chunk
             yield full_response, None
 
-        # 3. Post-process refactored code if requested
-        if any(k in prompt.lower() for k in ['refactor', 'fix', 'rewrite', 'improve']):
-            refactored_paths = FileProcessor.extract_and_save_code(full_response, original_names)
-            yield full_response, refactored_paths
-        else:
-            yield full_response, None
+        # Auto-extract if code blocks exist
+        if "```" in full_response:
+            paths = self.processor.extract_and_save_code(full_response, original_names)
+            if paths:
+                yield full_response, paths
+            else:
+                yield full_response, None
 
     def cancel(self):
         self.is_cancelled = True
 
     def create_interface(self):
-        with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+        with gr.Blocks(analytics_enabled=False) as ui:
             gr.Markdown("# Ollama Code Review Assistant")
 
             with gr.Row():
                 with gr.Column(scale=1):
-                    with gr.Group():
-                        gr.Markdown("### Settings")
+                    with gr.Accordion("Connection Settings", open=False):
                         host_input = gr.Textbox(label="Ollama Host", value=DEFAULT_HOST)
-                        refresh_btn = gr.Button("Refresh Models", size="sm")
-                        status_msg = gr.Markdown("")
+                        refresh_btn = gr.Button("Refresh Connection")
+                        status_msg = gr.Markdown("Status: Unknown")
 
-                        model_selector = gr.Radio(
-                            label="Available Models",
-                            choices=[],
-                            elem_classes="model-box"
-                        )
+                    model_selector = gr.Dropdown(label="Model Selection", choices=[])
 
-                    gr.Markdown("### Request")
-                    prompt_input = gr.Textbox(
-                        label="Instructions",
-                        placeholder="e.g. Find security vulnerabilities and refactor for performance...",
-                        lines=4
+                    sys_prompt_input = gr.Textbox(
+                        label="System Role",
+                        value="You are an expert software engineer. Provide concise, actionable code reviews. Use markdown code blocks for refactored code.",
+                        lines=2
                     )
-                    file_input = gr.File(label="Source Files", file_count="multiple")
+
+                    user_prompt_input = gr.Textbox(
+                        label="Instruction",
+                        placeholder="e.g. Refactor for readability and fix bugs",
+                        value="Review this code for security vulnerabilities and suggest optimizations."
+                    )
+
+                    file_input = gr.File(label="Upload Source Files", file_count="multiple")
 
                     with gr.Row():
                         submit_btn = gr.Button("Analyze", variant="primary")
                         cancel_btn = gr.Button("Stop")
+                        clear_btn = gr.ClearButton()
 
                 with gr.Column(scale=2):
-                    gr.Markdown("### Analysis Result")
-                    output_markdown = gr.Markdown(
-                        "Upload files and click Analyze to start...",
-                        elem_classes="results-area"
-                    )
-                    download_output = gr.File(label="Download Refactored Code")
+                    output_markdown = gr.Markdown(label="Analysis", value="### Results will appear here...")
+                    download_output = gr.File(label="Download Refactored Files")
 
             # Events
-            demo.load(self.handle_refresh, [host_input], [model_selector, status_msg])
+            clear_btn.add([user_prompt_input, file_input, output_markdown, download_output])
+
+            ui.load(self.handle_refresh, [host_input], [model_selector, status_msg])
             refresh_btn.click(self.handle_refresh, [host_input], [model_selector, status_msg])
 
-            submit_event = submit_btn.click(
+            submit_evt = submit_btn.click(
                 self.handle_submit,
-                [host_input, model_selector, prompt_input, file_input],
-                [output_markdown, download_output]
+                inputs=[host_input, model_selector, sys_prompt_input, user_prompt_input, file_input],
+                outputs=[output_markdown, download_output]
             )
 
-            cancel_btn.click(self.cancel, cancels=[submit_event])
+            cancel_btn.click(self.cancel, None, None, cancels=[submit_evt])
 
-        return demo
+        return ui
 
 if __name__ == "__main__":
     app = AppUI()
-    app.create_interface().launch(server_name='0.0.0.0', server_port=7860)
+    app.create_interface().launch(server_name="0.0.0.0", server_port=7860,theme=gr.themes.Default(primary_hue="blue"))
