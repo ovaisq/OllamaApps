@@ -189,8 +189,6 @@ if openlit_available:
     try:
         openlit.init(
             otlp_endpoint=CONFIG.get('otlp','OTLP_ENDPOINT_URL'),
-            collect_gpu_stats=CONFIG.get('otlp','COLLECT_GPU_STATS'),
-            pricing_json=CONFIG.get('otlp','PRICING_JSON'),
             environment='production',
             application_name='ollama-web-assistant'
         )
@@ -690,7 +688,5 @@ if __name__ == "__main__":
 
     # Gradio 6.0: Pass theme and css to launch() instead of Blocks()
     ui.launch(
-        server_name="0.0.0.0",
-        css=custom_css,
-        theme=gr.themes.Glass()
+        server_name="0.0.0.0"
     )
