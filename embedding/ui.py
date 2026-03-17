@@ -40,15 +40,21 @@ import traceback
 import sys
 from typing import List
 
-# Set USER_AGENT before other imports
-user_agents = [
+USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
     "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:54.0) Gecko/20100101 Firefox/54.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
+    "Mozilla/5.0 (Android 13; Mobile; rv:131.0) Gecko/20100101 Firefox/131.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/16F73 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/136.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko"
 ]
-os.environ['USER_AGENT'] = random.choice(user_agents)
+os.environ['USER_AGENT'] = random.choice(USER_AGENTS)
 
 import gradio as gr
 
@@ -128,6 +134,48 @@ if OLLAMA_HOST:
 else:
     os.environ['OLLAMA_HOST'] = ""
 
+# Database query constants
+_KEYPHRASE_TREND_QUERY = """
+WITH ExtractedLines AS (
+    SELECT
+        jsonb_array_elements_text(summarized_results->'urls') AS urls,
+        summarized_results->>'new_results' AS new_results,
+        regexp_replace(line_text, '^\\d+\\.\\s*', '', 'g') AS line_text,
+        ordinality
+    FROM
+        summarized_results,
+        LATERAL unnest(string_to_array(summarized_results->>'keyword_list', E'\\n')) WITH ORDINALITY AS t(line_text, ordinality)
+),
+FilteredLines AS (
+    SELECT urls, new_results, line_text, ordinality
+    FROM ExtractedLines
+    WHERE ordinality > (
+        SELECT MAX(ordinality) - 3
+        FROM ExtractedLines e2
+        WHERE ExtractedLines.urls = e2.urls
+    )
+)
+SELECT line_text AS keyword_list
+FROM FilteredLines
+WHERE line_text != ''
+ORDER BY ordinality;
+"""
+
+_CHECK_URL_QUERY = """
+SELECT *
+FROM summarized_results
+WHERE summarized_results->'urls' ? %s
+AND lower((summarized_results->>'q_n_i')) LIKE %s;
+"""
+
+_INSERT_QUERY = "INSERT INTO summarized_results (summarized_results) VALUES (%s)"
+
+
+def _get_db_connection():
+    """Get database connection with context manager support."""
+    return psycopg2.connect(**PG_CONN_PARAMS)
+
+
 # Initialize OpenLIT if available
 if openlit_available:
     try:
@@ -142,142 +190,48 @@ if openlit_available:
         print(f"WARNING: OpenLIT initialization failed: {e}")
 
 def set_random_user_agent():
-    """Picks a random user-agent from a given list and sets it as an environment variable USER_AGENT.
+    """Picks a random user-agent from a given list and sets it as an environment variable USER_AGENT."""
 
-        Returns:
-            str: The randomly selected user-agent string, or None if the list is empty.
-    """
-
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:54.0) Gecko/20100101 Firefox/54.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
-        "Mozilla/5.0 (Android 13; Mobile; rv:131.0) Gecko/20100101 Firefox/131.0",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/16F73 Safari/604.1",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/136.0.0.0",
-        "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko"
-    ]
-
-    random_user_agent = random.choice(user_agents)
+    random_user_agent = random.choice(USER_AGENTS)
     os.environ['USER_AGENT'] = random_user_agent
 
 def get_keyphrase_trends():
     """Get list of keyphrases"""
 
     try:
-        # Establish a connection to the database using the provided configuration
-        conn = psycopg2.connect(**PG_CONN_PARAMS)
-
-        # Create a cursor object
-        cur = conn.cursor()
-
-        # Execute the query with the provided parameters
-        sql_q = """
-        WITH ExtractedLines AS (
-            SELECT
-                jsonb_array_elements_text(summarized_results->'urls') AS urls,
-                summarized_results->>'new_results' AS new_results, -- Include new_results
-                regexp_replace(line_text, '^\\d+\\.\\s*', '', 'g') AS line_text, -- Remove leading numbers
-                ordinality
-            FROM
-                summarized_results,
-                LATERAL unnest(string_to_array(summarized_results->>'keyword_list', E'\\n')) WITH ORDINALITY AS t(line_text, ordinality)
-        ),
-        FilteredLines AS (
-            SELECT urls, new_results, line_text, ordinality
-            FROM ExtractedLines
-            WHERE ordinality > (
-                SELECT MAX(ordinality) - 3
-                FROM ExtractedLines e2
-                WHERE ExtractedLines.urls = e2.urls
-            )
-        )
-        SELECT line_text AS keyword_list
-        FROM FilteredLines
-        WHERE line_text != ''
-        ORDER BY ordinality;
-        """
-        cur.execute(sql_q)
-
-        # Fetch all results
-        rows = cur.fetchall()
-        blob_of_text = "\n".join([row[0] for row in rows])
-        # Close communication with the database
-        cur.close()
-        conn.close()
-
-        # Return True if any rows were found, otherwise False
-        return blob_of_text
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_KEYPHRASE_TREND_QUERY)
+                rows = cur.fetchall()
+                return "\n".join([row[0] for row in rows])
     except Exception as e:
         print(f"An error occurred: {e}")
         return ""
 
+
 def check_for_url_and_query(url_to_search, keyword_pattern):
-    """Checks if there exists a row in the summarized_results table that matches the specified
-        criteria.
-    """
+    """Checks if there exists a row in the summarized_results table matching the criteria."""
 
     try:
-        # Establish a connection to the database using the provided configuration
-        conn = psycopg2.connect(**PG_CONN_PARAMS)
-
-        # Create a cursor object
-        cur = conn.cursor()
-
-        # Execute the query with the provided parameters
-        cur.execute( """
-                SELECT *
-                FROM summarized_results
-                WHERE summarized_results->'urls' ? %s
-                AND lower((summarized_results->>'q_n_i')) LIKE %s;
-                """, (url_to_search, (keyword_pattern.lower() + '%')))
-
-        # Fetch all results
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        query_results = [dict(zip(columns, row)) for row in rows]
-        # Close communication with the database
-        cur.close()
-        conn.close()
-
-        # Return True if any rows were found, otherwise False
-        return query_results
-
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_CHECK_URL_QUERY, (url_to_search, (keyword_pattern.lower() + '%')))
+                rows = cur.fetchall()
+                columns = [desc[0] for desc in cur.description]
+                return [dict(zip(columns, row)) for row in rows]
     except Exception as e:
         print(f"An error occurred: {e}")
         return False
+
 
 def insert_json_to_table(json_doc):
     """Insert JSON into JSONB column"""
 
     try:
-        # Establish a connection to the database using the provided configuration
-        conn = psycopg2.connect(**PG_CONN_PARAMS)
-
-        # Create a cursor object
-        cur = conn.cursor()
-
-        # Parse JSON document
         json_blob = json.loads(json_doc)
-
-        # Define SQL query with a placeholder for the JSONB column
-        query_p = sql.SQL("INSERT INTO summarized_results (summarized_results) VALUES (%s)")
-
-        # Execute the query, passing the JSON as a parameter
-        cur.execute(query_p, (json.dumps(json_blob),))
-
-        # Commit the transaction
-        conn.commit()
-
-        # Close the cursor and connection
-        cur.close()
-        conn.close()
-
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_INSERT_QUERY, (json.dumps(json_blob),))
     except Exception as e:
         print(f"An error occurred: {e}")
         return False
@@ -315,21 +269,25 @@ def embed_and_store_documents(documents: List):
         text_splitter = CharacterTextSplitter.from_tiktoken_encoder(chunk_size=7500,
                                                                     chunk_overlap=100)
         doc_splits = text_splitter.split_documents(documents)
-
         embedding_model = OllamaEmbeddings(model=EMBED_MODEL)
         vectorstore = PGVector.from_documents(doc_splits, embedding_model,
                                                 connection=PGVECTOR_CONNECTION)
 
-        with psycopg2.connect(**PG_CONN_PARAMS) as conn:
-            with conn.cursor() as cur:
-                for doc in doc_splits:
-                    cur.execute("SELECT id FROM rag_pgvector WHERE document = %s",
-                                (doc.page_content,))
-                    if not cur.fetchone():
-                        if langchain_available:
-                            vectorstore.add_documents([Document(page_content=doc.page_content)])
+        _check_and_add_documents(vectorstore, doc_splits)
     except Exception as e:
         print(f"Error embedding documents: {e}\n{traceback.format_exc()}")
+
+
+def _check_and_add_documents(vectorstore, doc_splits):
+    """Check if documents exist and add them if needed."""
+    with psycopg2.connect(**PG_CONN_PARAMS) as conn:
+        with conn.cursor() as cur:
+            for doc in doc_splits:
+                cur.execute("SELECT id FROM rag_pgvector WHERE document = %s",
+                            (doc.page_content,))
+                if not cur.fetchone():
+                    if langchain_available:
+                        vectorstore.add_documents([Document(page_content=doc.page_content)])
 
 def query_documents(url_list: List[str], query: str) -> str:
     """Queries the documents for the given question or instruction."""
@@ -380,37 +338,35 @@ def query_documents(url_list: List[str], query: str) -> str:
         return f"An error occurred while processing the query: {str(e)}"
 
 def get_trend_summary():
+    """Generate trending topics summary."""
 
     if not (ollama_available and langchain_available):
         return "Trending topics unavailable (langchain packages need update)"
 
     try:
-        # Define prompt template
-        prompt_template = """
-        Based on the following context, respond to the query:
-        Context: {context}
-        Query: {query}
-        """
-        prompt = ChatPromptTemplate.from_template(prompt_template)
-
         my_context = get_keyphrase_trends()
-
         if not my_context:
             return "No trending data available yet. Start querying to build trends!"
 
-        # Initialize the model
+        prompt = ChatPromptTemplate.from_template(_TREND_PROMPT_TEMPLATE)
         model = ChatOllama(model=LLM, temperature=0.7)
 
-        # Create the input for the pipeline
-        input_data = {"context": my_context, "query": "Based on this come up with trending topics, respond as a table of 3 columns. Nothing before or after or outside of the table."}
+        input_data = {
+            "context": my_context,
+            "query": "Based on this come up with trending topics, respond as a table of 3 columns. Nothing before or after or outside of the table."
+        }
 
-        # Run the pipeline
-        prompt_result = prompt.invoke(input_data)  # Process input through the prompt
-        model_result = model.invoke(prompt_result)  # Process the prompt result through the model
-        return model_result.content if hasattr(model_result, "content") else "No content available."
+        return model.invoke(prompt.invoke(input_data)).content or "No content available."
     except Exception as e:
-        print(f"Error querying documents: {e}\n{traceback.format_exc()}")
+        print(f"Error getting trends: {e}\n{traceback.format_exc()}")
         return "An error occurred while getting trends."
+
+
+_TREND_PROMPT_TEMPLATE = """
+Based on the following context, respond to the query:
+Context: {context}
+Query: {query}
+"""
 
 def process_input(urls_str: str, q_n_i: str):
     """Processes the input URLs and query to generate a response."""
