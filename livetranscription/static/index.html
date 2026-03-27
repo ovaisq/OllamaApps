@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#181614">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Transcribe">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="apple-touch-icon" href="/static/icon-192.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;1,300&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+    <title>Whisper — Live Transcription</title>
+    <style>
+        :root {
+            --bg:    #181614;
+            --bg1:   #1f1d1a;
+            --bg2:   #252220;
+            --bg3:   #2e2b27;
+            --line:  #333028;
+            --line2: #45413a;
+            --text:  #e2d8c8;
+            --text2: #8a8070;
+            --text3: #504a40;
+            --gold:  #c49a3c;
+            --gold2: #9a7628;
+            --green: #6a9e5a;
+            --red:   #a05848;
+            --amber: #b87c30;
+            --mono:  'IBM Plex Mono', monospace;
+            --sans:  'DM Sans', sans-serif;
+            --r:     3px;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: var(--sans);
+            font-weight: 300;
+            background: var(--bg);
+            min-height: 100vh;
+            color: var(--text);
+            padding: 20px 20px 48px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 1360px;
+            margin: 0 auto;
+            animation: fadein 0.3s ease;
+        }
+        @keyframes fadein { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+
+        /* ── Header ── */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 14px;
+            margin-bottom: 18px;
+            border-bottom: 1px solid var(--line);
+        }
+        .brand { display: flex; align-items: baseline; gap: 12px; }
+        .brand-name {
+            font-family: var(--mono);
+            font-weight: 300;
+            font-size: 14px;
+            letter-spacing: 0.1em;
+        }
+        .brand-name em { color: var(--gold); font-style: normal; }
+        .brand-sub {
+            font-size: 11px;
+            color: var(--text3);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .header-meta { display: flex; align-items: center; gap: 10px; }
+
+        /* ── Status pill ── */
+        .status {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            padding: 4px 9px 4px 7px;
+            border-radius: var(--r);
+            border: 1px solid var(--line2);
+            color: var(--text2);
+            background: var(--bg1);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: color .18s, border-color .18s;
+        }
+        .status::before {
+            content: '';
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: var(--text3);
+            flex-shrink: 0;
+            transition: background .18s;
+        }
+        .status.connected    { color: var(--green); border-color: var(--green); }
+        .status.connected::before    { background: var(--green); }
+        .status.recording    { color: var(--gold);  border-color: var(--gold);  }
+        .status.recording::before    { background: var(--gold); animation: blink 1.1s ease-in-out infinite; }
+        .status.connecting   { color: var(--amber); border-color: var(--amber); }
+        .status.connecting::before   { background: var(--amber); }
+        .status.waiting      { color: var(--amber); border-color: var(--amber); }
+        .status.waiting::before      { background: var(--amber); }
+        .status.disconnected { color: var(--text2); border-color: var(--line2); }
+        .status.disconnected::before { background: var(--text3); }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+        .secure-badge {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--green);
+            opacity: 0.55;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            letter-spacing: 0.04em;
+        }
+        .secure-badge svg { width: 10px; height: 10px; }
+
+        /* ── Config bar ── */
+        .config-bar {
+            background: var(--bg1);
+            border: 1px solid var(--line);
+            border-radius: var(--r);
+            padding: 11px 14px;
+            margin-bottom: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+        .config-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        @media (max-width: 480px) {
+            .config-row { flex-direction: column; align-items: stretch; gap: 6px; }
+        }
+        .config-label {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+            color: var(--text3);
+            white-space: nowrap;
+            min-width: 108px;
+        }
+        @media (max-width: 480px) {
+            .config-label { min-width: auto; flex-shrink: 0; }
+            .config-row > select { flex: 1; min-width: 0; }
+        }
+
+        input[type="text"], select {
+            font-family: var(--mono);
+            font-size: 12px;
+            padding: 6px 9px;
+            border: 1px solid var(--line2);
+            border-radius: var(--r);
+            background: var(--bg2);
+            color: var(--text);
+            outline: none;
+            transition: border-color .15s;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+        input[type="text"] { flex: 1; min-width: 180px; }
+        input[type="text"]::placeholder { color: var(--text3); }
+        input[type="text"]:focus, select:focus { border-color: var(--gold2); }
+        select {
+            padding-right: 24px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23504a40'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+        }
+        select option { background: var(--bg2); }
+
+        /* ── Meta strip ── */
+        .meta-strip {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            min-height: 16px;
+        }
+        .session-info {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            color: var(--text3);
+        }
+        .language-detected {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            color: var(--gold);
+        }
+
+        /* ── Visualizer ── */
+        .audio-visualizer {
+            height: 44px;
+            background: var(--bg1);
+            border: 1px solid var(--line);
+            border-radius: var(--r);
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+            padding: 0 14px;
+            overflow: hidden;
+        }
+        .bar {
+            width: 3px;
+            background: var(--gold2);
+            border-radius: 1px;
+            opacity: 0.4;
+            transition: height 0.07s ease;
+            min-height: 3px;
+        }
+
+        /* ── Two-column layout ── */
+        .columns {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            align-items: start;
+        }
+        @media (max-width: 740px) { .columns { grid-template-columns: 1fr; } }
+
+        .col-header {
+            font-family: var(--mono);
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            color: var(--text3);
+            margin-bottom: 7px;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+        }
+
+        /* ── Transcription box ── */
+        .transcription-box {
+            background: var(--bg1);
+            border: 1px solid var(--line);
+            border-radius: var(--r);
+            padding: 18px 20px;
+            min-height: 440px;
+            max-height: 63vh;
+            overflow-y: auto;
+        }
+        .transcription-box::-webkit-scrollbar { width: 3px; }
+        .transcription-box::-webkit-scrollbar-track { background: transparent; }
+        .transcription-box::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 2px; }
+
+        .transcription-text {
+            font-family: var(--mono);
+            font-size: 13px;
+            font-weight: 300;
+            line-height: 2;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: var(--text);
+        }
+        .transcription-text .confirmed  { color: var(--text); }
+        .transcription-text .unconfirmed { color: var(--text2); font-style: italic; }
+
+        /* ── Buttons ── */
+        .controls { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 9px; justify-content: center; }
+
+        button {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            padding: 7px 13px;
+            border: 1px solid var(--line2);
+            border-radius: var(--r);
+            cursor: pointer;
+            background: var(--bg1);
+            color: var(--text2);
+            transition: background .13s, color .13s, border-color .13s;
+        }
+        button:hover:not(:disabled) { background: var(--bg3); color: var(--text); border-color: var(--text3); }
+        button:disabled { opacity: 0.28; cursor: not-allowed; }
+
+        .btn-primary   { background: var(--gold2); color: var(--bg); border-color: var(--gold2); font-weight: 400; }
+        .btn-primary:hover:not(:disabled) { background: var(--gold); border-color: var(--gold); color: var(--bg); }
+        .btn-success   { border-color: var(--green); color: var(--green); }
+        .btn-success:hover:not(:disabled) { background: var(--green); color: var(--bg); }
+        .btn-danger    { border-color: var(--red); color: var(--red); }
+        .btn-danger:hover:not(:disabled)  { background: var(--red); color: var(--text); }
+        .btn-secondary { border-color: var(--line2); color: var(--text2); }
+        .btn-install   { border-color: var(--gold2); color: var(--gold); display: none; }
+
+        /* ── Ollama panel ── */
+        .ollama-panel {
+            background: var(--bg1);
+            border: 1px solid var(--line);
+            border-radius: var(--r);
+            padding: 18px 20px;
+            min-height: 440px;
+            max-height: 63vh;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .ollama-panel::-webkit-scrollbar { width: 3px; }
+        .ollama-panel::-webkit-scrollbar-track { background: transparent; }
+        .ollama-panel::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 2px; }
+
+        .ollama-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            gap: 10px;
+            min-height: 320px;
+            color: var(--text3);
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.06em;
+            text-align: center;
+            line-height: 1.9;
+        }
+        .ollama-placeholder svg { opacity: 0.18; width: 28px; height: 28px; }
+
+        .ollama-spinner {
+            width: 11px; height: 11px;
+            border: 1.5px solid var(--line2);
+            border-top-color: var(--gold);
+            border-radius: 50%;
+            animation: spin 0.65s linear infinite;
+            display: none;
+            flex-shrink: 0;
+        }
+        .ollama-spinner.active { display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .ollama-section { display: flex; flex-direction: column; gap: 7px; }
+        .ollama-section-label {
+            font-family: var(--mono);
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.13em;
+            color: var(--text3);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .ollama-section-content {
+            font-family: var(--sans);
+            font-weight: 300;
+            font-size: 13px;
+            line-height: 1.75;
+            color: var(--text);
+        }
+        .ollama-section-content.loading {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--text3);
+            font-style: italic;
+            letter-spacing: 0.04em;
+        }
+        .action-item {
+            display: flex;
+            gap: 9px;
+            align-items: flex-start;
+            margin-bottom: 5px;
+            font-size: 13px;
+            font-weight: 300;
+            color: var(--text);
+            line-height: 1.65;
+        }
+        .action-item::before {
+            content: '–';
+            color: var(--gold2);
+            flex-shrink: 0;
+            font-family: var(--mono);
+            margin-top: 1px;
+        }
+        .divider { border: none; border-top: 1px solid var(--line); }
+        .ollama-status-bar {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--text3);
+            margin-top: auto;
+            padding-top: 10px;
+            border-top: 1px solid var(--line);
+            letter-spacing: 0.03em;
+        }
+
+        /* ── Toast ── */
+        .copy-notification {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: var(--bg2);
+            border: 1px solid var(--green);
+            color: var(--green);
+            padding: 8px 15px;
+            border-radius: var(--r);
+            display: none;
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            animation: toast .18s ease;
+        }
+        @keyframes toast { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- Header -->
+    <div class="header">
+        <div class="brand">
+            <span class="brand-name"><em>whisper</em> live</span>
+            <span class="brand-sub">Real-time transcription</span>
+        </div>
+        <div class="header-meta">
+            <span class="secure-badge" id="secureBadge" style="display:none;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                Secure
+            </span>
+            <span class="status disconnected" id="status">Disconnected</span>
+        </div>
+    </div>
+
+    <!-- Config -->
+    <div class="config-bar">
+        <div class="config-row" style="display:none;">
+            <span class="config-label">Server</span>
+            <input type="text" id="serverUrl" placeholder="Auto-detect" value="">
+            <button class="btn-primary" id="setServerBtn" onclick="updateServerUrl()">Update</button>
+        </div>
+        <div class="config-row">
+            <span class="config-label">Language</span>
+            <select id="language">
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+                <option value="nl">Dutch</option>
+                <option value="pl">Polish</option>
+                <option value="fi">Finnish</option>
+                <option value="ru">Russian</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="zh">Chinese</option>
+                <option value="ar">Arabic</option>
+                <option value="hi">Hindi</option>
+                <option value="tr">Turkish</option>
+                <option value="vi">Vietnamese</option>
+                <option value="th">Thai</option>
+                <option value="id">Indonesian</option>
+            </select>
+            <span class="config-label" style="min-width:54px;">Model</span>
+            <select id="modelSize">
+                <option value="tiny.en">Tiny (English)</option>
+                <option value="tiny">Tiny (Multi)</option>
+                <option value="base.en" selected>Base (English)</option>
+                <option value="base">Base (Multi)</option>
+                <option value="small.en">Small (English)</option>
+                <option value="small">Small (Multi)</option>
+                <option value="medium.en">Medium (English)</option>
+                <option value="medium">Medium (Multi)</option>
+                <option value="large-v3">Large v3</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Meta strip -->
+    <div class="meta-strip">
+        <span class="session-info" id="sessionInfo">Click Connect to start transcription</span>
+        <span class="language-detected" id="languageInfo"></span>
+    </div>
+
+    <!-- Visualizer -->
+    <div class="audio-visualizer" id="visualizer">
+        <div class="bar" style="height:4px;"></div>
+        <div class="bar" style="height:7px;"></div>
+        <div class="bar" style="height:12px;"></div>
+        <div class="bar" style="height:18px;"></div>
+        <div class="bar" style="height:22px;"></div>
+        <div class="bar" style="height:26px;"></div>
+        <div class="bar" style="height:22px;"></div>
+        <div class="bar" style="height:18px;"></div>
+        <div class="bar" style="height:12px;"></div>
+        <div class="bar" style="height:7px;"></div>
+        <div class="bar" style="height:4px;"></div>
+    </div>
+
+    <!-- Two-column content -->
+    <div class="columns">
+
+        <!-- Left: Transcription -->
+        <div>
+            <div class="col-header">Transcription</div>
+            <div class="transcription-box">
+                <div class="transcription-text" id="transcription">Waiting for connection...</div>
+            </div>
+            <div class="controls">
+                <button class="btn-primary"   id="connectBtn"  onclick="toggleConnection()">Connect</button>
+                <button class="btn-success"   id="startBtn"    onclick="startTranscription()" disabled>Start</button>
+                <button class="btn-danger"    id="stopBtn"     onclick="stopTranscription()"  disabled>Stop</button>
+                <button class="btn-secondary" id="copyBtn"     onclick="copyText()">Copy</button>
+                <button class="btn-secondary" id="downloadBtn" onclick="downloadTranscript()">Download</button>
+                <button class="btn-secondary" id="clearBtn"    onclick="clearText()">Clear</button>
+                <button class="btn-install"   id="installBtn"  onclick="installApp()">Install App</button>
+            </div>
+        </div>
+
+        <!-- Right: AI Processing -->
+        <div>
+            <div class="col-header">
+                AI Processing
+                <span class="ollama-spinner" id="ollamaSpinner"></span>
+            </div>
+            <div class="ollama-panel" id="ollamaPanel">
+                <div class="ollama-placeholder" id="ollamaPlaceholder">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M12 6v6l4 2"/>
+                    </svg>
+                    Stop recording to trigger<br>AI processing
+                </div>
+                <div id="ollamaResults" style="display:none;flex-direction:column;gap:16px;">
+                    <div class="ollama-section">
+                        <div class="ollama-section-label">Summary</div>
+                        <div class="ollama-section-content loading" id="ollamaSummary">Processing...</div>
+                    </div>
+                    <hr class="divider">
+                    <div class="ollama-section">
+                        <div class="ollama-section-label">Cleaned Transcript</div>
+                        <div class="ollama-section-content loading" id="ollamaCleaned">Processing...</div>
+                    </div>
+                    <hr class="divider">
+                    <div class="ollama-section">
+                        <div class="ollama-section-label">Action Items</div>
+                        <div class="ollama-section-content" id="ollamaActions"></div>
+                    </div>
+                    <div class="ollama-status-bar" id="ollamaStatus"></div>
+                </div>
+            </div>
+        </div>
+
+    </div><!-- /columns -->
+</div><!-- /container -->
+
+<div class="copy-notification" id="notification">Copied</div>
+
+<script>
+    let ws = null;
+    let wsControl = null;
+    let mediaStream = null;
+    let audioContext = null;
+    let analyser = null;
+    let scriptProcessor = null;
+    let isRecording = false;
+    let transcriptionText = '';
+    let serverUrl = '';
+    let uid = null;
+    let languageDetected = null;
+    let startTime = null;
+    let messageCount = 0;
+
+    const statusEl        = document.getElementById('status');
+    const transcriptionEl = document.getElementById('transcription');
+    const sessionInfoEl   = document.getElementById('sessionInfo');
+    const languageInfoEl  = document.getElementById('languageInfo');
+    const connectBtn      = document.getElementById('connectBtn');
+    const startBtn        = document.getElementById('startBtn');
+    const stopBtn         = document.getElementById('stopBtn');
+    const serverUrlInput  = document.getElementById('serverUrl');
+    const languageSelect  = document.getElementById('language');
+    const modelSizeSelect = document.getElementById('modelSize');
+    const secureBadge     = document.getElementById('secureBadge');
+
+    function detectServerUrl() {
+        const protocol = 'wss:';
+        const currentPort = window.location.port || '443';
+        const wsPort = parseInt(currentPort) + 1;
+        return `${protocol}//${window.location.hostname}:${wsPort}`;
+    }
+
+    function detectControlUrl() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${protocol}//${window.location.hostname}:9092`;
+    }
+
+    function connectControl() {
+        const controlUrl = detectControlUrl();
+        console.log('[Control] Connecting to', controlUrl);
+        wsControl = new WebSocket(controlUrl);
+        wsControl.onopen = () => {
+            console.log('[Control] Connected');
+            wsControl.send(JSON.stringify({ type: 'ping', uid: uid }));
+        };
+        wsControl.onmessage = (event) => { handleControlMessage(JSON.parse(event.data)); };
+        wsControl.onerror   = (e) => { console.error('[Control] Error:', e); };
+        wsControl.onclose   = () => { console.log('[Control] Disconnected'); wsControl = null; };
+    }
+
+    function handleControlMessage(msg) {
+        const spinner     = document.getElementById('ollamaSpinner');
+        const placeholder = document.getElementById('ollamaPlaceholder');
+        const results     = document.getElementById('ollamaResults');
+        const status      = document.getElementById('ollamaStatus');
+
+        switch (msg.type) {
+            case 'pong':
+                console.log('[Control] Registered uid:', uid);
+                break;
+            case 'ollama_start':
+                spinner.classList.add('active');
+                placeholder.style.display = 'none';
+                results.style.display = 'flex';
+                document.getElementById('ollamaSummary').textContent = 'Processing...';
+                document.getElementById('ollamaSummary').className = 'ollama-section-content loading';
+                document.getElementById('ollamaCleaned').textContent = 'Processing...';
+                document.getElementById('ollamaCleaned').className = 'ollama-section-content loading';
+                document.getElementById('ollamaActions').innerHTML = '';
+                status.textContent = 'Ollama processing started...';
+                break;
+            case 'ollama_cleaned':
+                const cleanedEl = document.getElementById('ollamaCleaned');
+                // Use HTML if available, otherwise fall back to escaped text
+                if (msg.html) {
+                    cleanedEl.innerHTML = msg.html;
+                } else {
+                    cleanedEl.textContent = msg.text;
+                }
+                cleanedEl.className = 'ollama-section-content';
+                status.textContent = 'Transcript cleaned ✓';
+                break;
+            case 'ollama_summary':
+                const summaryEl = document.getElementById('ollamaSummary');
+                // Use HTML if available, otherwise fall back to escaped text
+                if (msg.html) {
+                    summaryEl.innerHTML = msg.html;
+                } else {
+                    summaryEl.textContent = msg.text;
+                }
+                summaryEl.className = 'ollama-section-content';
+                status.textContent = 'Summary complete ✓';
+                break;
+            case 'ollama_actions':
+                const actionsEl = document.getElementById('ollamaActions');
+                if ((msg.items && msg.items.length > 0) || (msg.items_html && msg.items_html.length > 0)) {
+                    // Use HTML items if available
+                    const htmlItems = msg.items_html || msg.items.map(i => escapeHtml(i));
+                    actionsEl.innerHTML = htmlItems
+                        .filter((i, idx) => {
+                            const textItem = msg.items ? msg.items[idx] : i;
+                            return textItem && textItem.trim();
+                        })
+                        .map(i => `<div class="action-item">${i}</div>`)
+                        .join('');
+                } else {
+                    actionsEl.innerHTML = '<span style="color:var(--text3);font-style:italic;font-size:11px;font-family:var(--mono);">No action items found</span>';
+                }
+                status.textContent = 'Action items extracted ✓';
+                break;
+            case 'ollama_done':
+                spinner.classList.remove('active');
+                status.textContent = `Complete — ${new Date().toLocaleTimeString()}`;
+                break;
+            case 'ollama_error':
+                spinner.classList.remove('active');
+                placeholder.style.display = 'none';
+                results.style.display = 'flex';
+                status.textContent = `Error: ${msg.error}`;
+                console.error('[Control] Ollama error:', msg.error);
+                break;
+        }
+    }
+
+    function initServerUrl() {
+        const detectedUrl = detectServerUrl();
+        serverUrl = detectedUrl;
+        serverUrlInput.value = detectedUrl;
+        serverUrlInput.placeholder = detectedUrl;
+        if (window.location.protocol === 'https:') {
+            secureBadge.style.display = 'inline-flex';
+        }
+    }
+
+    function generateUid() {
+        return 'client-' + Math.random().toString(36).substr(2, 9);
+    }
+
+    function updateServerUrl() {
+        const url = serverUrlInput.value.trim();
+        if (!url) { alert('Please enter a valid server URL'); return; }
+        serverUrl = url;
+        sessionInfoEl.textContent = 'WebSocket URL updated: ' + url;
+    }
+
+    function toggleConnection() {
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            disconnect();
+        } else {
+            connect();
+        }
+    }
+
+    function connect() {
+        if (ws) ws.close();
+
+        const url = serverUrlInput.value.trim() || detectServerUrl();
+        serverUrl = url;
+        uid = generateUid();
+        startTime = Date.now();
+        messageCount = 0;
+
+        statusEl.textContent = 'Connecting';
+        statusEl.className = 'status connecting';
+        connectBtn.disabled = true;
+
+        try {
+            console.log('[INFO]: Connecting to', url);
+            ws = new WebSocket(url);
+            ws.binaryType = 'arraybuffer';
+
+            const connectionTimeout = setTimeout(() => {
+                if (ws.readyState === WebSocket.CONNECTING) {
+                    statusEl.textContent = 'Timeout';
+                    statusEl.className = 'status disconnected';
+                    connectBtn.disabled = false;
+                    ws.close();
+                    alert('Connection timed out. Make sure:\n1. You are on the same network as the server\n2. Port 9091 is not blocked\n3. For mobile: Trust the certificate in Settings');
+                }
+            }, 10000);
+
+            ws.onopen = () => {
+                clearTimeout(connectionTimeout);
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.disabled = false;
+                startBtn.disabled = false;
+                sessionInfoEl.textContent = 'Ready — click Start to begin';
+                connectControl();
+                const modelSizeValue = modelSizeSelect.value.replace('.en', '');
+                ws.send(JSON.stringify({
+                    uid,
+                    language: languageSelect.value,
+                    model_size: modelSizeValue,
+                    task: 'transcribe',
+                    multilingual: !modelSizeSelect.value.endsWith('.en')
+                }));
+            };
+
+            ws.onmessage = (event) => { handleMessage(event.data); };
+
+            ws.onerror = (error) => {
+                console.error('[ERROR]: WebSocket error:', error);
+                statusEl.textContent = 'Error';
+                statusEl.className = 'status disconnected';
+                connectBtn.disabled = false;
+            };
+
+            ws.onclose = (closeEvent) => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+                connectBtn.textContent = 'Connect';
+                connectBtn.disabled = false;
+                startBtn.disabled = true;
+                stopBtn.disabled = true;
+                sessionInfoEl.textContent = 'Click Connect to start transcription';
+                isRecording = false;
+                stopVisualizer();
+            };
+        } catch (e) {
+            console.error('[ERROR]: Failed to connect:', e);
+            statusEl.textContent = 'Failed';
+            statusEl.className = 'status disconnected';
+            connectBtn.disabled = false;
+            alert('Failed to connect to server. Make sure the server is running.');
+        }
+    }
+
+    function handleMessage(data) {
+        let message;
+        try {
+            message = typeof data === 'string' ? JSON.parse(data) : data;
+        } catch (e) {
+            console.error('[ERROR]: Failed to parse message:', e);
+            return;
+        }
+
+        if (message.uid && message.uid !== uid) return;
+
+        if (message.status) {
+            if (message.status === 'WAIT') {
+                statusEl.textContent = 'Waiting';
+                statusEl.className = 'status waiting';
+                sessionInfoEl.textContent = `Estimated wait: ${Math.round(message.message || 0)} min`;
+                return;
+            } else if (message.status === 'ERROR') {
+                alert('Server error: ' + message.message);
+                return;
+            }
+        }
+
+        if (message.message === 'DISCONNECT') { stopTranscription(); return; }
+
+        if (message.message === 'SERVER_READY') {
+            sessionInfoEl.textContent = 'Server ready — click Start to begin';
+            return;
+        }
+
+        if (message.language) {
+            languageDetected = message.language;
+            const confidence = ((message.language_prob || 0) * 100).toFixed(1);
+            languageInfoEl.textContent = `${message.language} · ${confidence}%`;
+            return;
+        }
+
+        if (message.segments) {
+            updateTranscription(message.segments);
+            messageCount++;
+            updateStats();
+        }
+    }
+
+    let transcriptSegments = [];
+
+    function updateTranscription(segments) {
+        if (!segments || segments.length === 0) return;
+        const newSegments = segments.filter(seg =>
+            !transcriptSegments.some(e => e.start === seg.start && e.end === seg.end)
+        );
+        if (newSegments.length > 0) transcriptSegments.push(...newSegments);
+        const fullText = transcriptSegments.map(s => s.text).filter(t => t).join(' ');
+        transcriptionText = fullText;
+        const displayText = segments.map(s => s.text).filter(t => t).join(' ');
+        transcriptionEl.innerHTML = '<span class="confirmed">' + escapeHtml(displayText) + '</span>';
+    }
+
+    async function startTranscription() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Please connect first'); return; }
+        try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            });
+            audioContext = new AudioContext({ sampleRate: 16000 });
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            source.connect(analyser);
+            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+            analyser.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+            scriptProcessor.onaudioprocess = (event) => {
+                if (!isRecording || ws.readyState !== WebSocket.OPEN) return;
+                ws.send(event.inputBuffer.getChannelData(0).buffer);
+            };
+            isRecording = true;
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            statusEl.textContent = 'Recording';
+            statusEl.className = 'status recording';
+            sessionInfoEl.textContent = 'Listening...';
+            visualize();
+        } catch (err) {
+            console.error('[ERROR]: Error accessing microphone:', err);
+            alert('Could not access microphone. Please allow microphone access.');
+        }
+    }
+
+    function stopTranscription() {
+        isRecording = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusEl.textContent = 'Connected';
+        statusEl.className = 'status connected';
+        sessionInfoEl.textContent = 'Transcription paused';
+
+        if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+        if (mediaStream)      { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+        if (audioContext)     { audioContext.close(); audioContext = null; }
+        if (analyser)         { analyser.disconnect(); analyser = null; }
+
+        stopVisualizer();
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'end_audio' }));
+        }
+
+        if (wsControl && wsControl.readyState === WebSocket.OPEN && transcriptionText.trim()) {
+            wsControl.send(JSON.stringify({ type: 'end_audio', uid, transcript: transcriptionText }));
+        }
+    }
+
+    function disconnect() {
+        stopTranscription();
+        if (ws)        { ws.close(); ws = null; }
+        if (wsControl) { wsControl.close(); wsControl = null; }
+    }
+
+    function visualize() {
+        if (!isRecording || !analyser) return;
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const bars = document.querySelectorAll('.bar');
+        function draw() {
+            if (!isRecording) return;
+            analyser.getByteFrequencyData(dataArray);
+            bars.forEach((bar, i) => {
+                const v = dataArray[i] || 0;
+                bar.style.height  = Math.max(3, (v / 255) * 36) + 'px';
+                bar.style.opacity = v > 12 ? '0.85' : '0.3';
+            });
+            requestAnimationFrame(draw);
+        }
+        draw();
+    }
+
+    function stopVisualizer() {
+        const bars = document.querySelectorAll('.bar');
+        const mid = Math.floor(bars.length / 2);
+        bars.forEach((bar, i) => {
+            bar.style.height  = Math.max(3, 22 - Math.abs(i - mid) * 4) + 'px';
+            bar.style.opacity = '0.35';
+        });
+    }
+
+    function updateStats() {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        const m = Math.floor(elapsed / 60), s = elapsed % 60;
+        sessionInfoEl.textContent = `${m}:${String(s).padStart(2,'0')}  ·  ${messageCount} seg`;
+    }
+
+    function copyText() {
+        if (!transcriptionText) { alert('No text to copy'); return; }
+        navigator.clipboard.writeText(transcriptionText).then(() => {
+            const n = document.getElementById('notification');
+            n.style.display = 'block';
+            setTimeout(() => { n.style.display = 'none'; }, 1800);
+        });
+    }
+
+    function clearText() {
+        transcriptionText = '';
+        transcriptSegments = [];
+        transcriptionEl.textContent = 'Waiting for connection...';
+        languageInfoEl.textContent = '';
+        messageCount = 0;
+        updateStats();
+    }
+
+    function downloadTranscript() {
+        if (!transcriptionText) { alert('No transcript to download'); return; }
+        const ts  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+        const blob = new Blob([transcriptionText], { type: 'text/plain' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href = url; a.download = `transcript-${ts}.txt`;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a); URL.revokeObjectURL(url);
+    }
+
+    function escapeHtml(text) {
+        const d = document.createElement('div');
+        d.textContent = text;
+        return d.innerHTML;
+    }
+
+    window.addEventListener('beforeunload', () => {
+        if (ws) ws.close();
+        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+        if (audioContext) audioContext.close();
+    });
+
+    // PWA
+    let deferredPrompt = null;
+    const installBtn = document.getElementById('installBtn');
+
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/static/sw.js')
+                .then(r  => console.log('[PWA] SW registered:', r.scope))
+                .catch(e => console.error('[PWA] SW failed:', e));
+        });
+    }
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        if (installBtn) installBtn.style.display = 'flex';
+    });
+
+    window.addEventListener('appinstalled', () => {
+        deferredPrompt = null;
+        if (installBtn) installBtn.style.display = 'none';
+    });
+
+    function installApp() {
+        if (!deferredPrompt) return;
+        deferredPrompt.prompt();
+        deferredPrompt.userChoice.then(() => {
+            deferredPrompt = null;
+            if (installBtn) installBtn.style.display = 'none';
+        });
+    }
+
+    initServerUrl();
+    console.log('Whisper Live Transcription UI loaded');
+</script>
+</body>
+</html>
