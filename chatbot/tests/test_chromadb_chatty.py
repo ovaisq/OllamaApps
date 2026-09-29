@@ -7,13 +7,14 @@ import chromadb_chatty
 
 @pytest.fixture
 def chat():
-    with patch("chromadb_chatty.ollama.Client") as mock_ollama_cls, \
+    mock_ollama_client = MagicMock()
+    with patch("chromadb_chatty.build_ollama_client", return_value=mock_ollama_client), \
          patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls:
         mock_collection = MagicMock()
         mock_chroma_cls.return_value.get_collection.return_value = mock_collection
         instance = chromadb_chatty.ChromaChat()
     instance._stop_reload.set()  # stop the background reloader thread for the test
-    return instance, mock_collection, mock_ollama_cls.return_value
+    return instance, mock_collection, mock_ollama_client
 
 
 def test_retrieve_context_embeds_query_before_similarity_search(chat):

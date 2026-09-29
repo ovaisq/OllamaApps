@@ -9,10 +9,16 @@ import logging
 import os
 
 import chromadb
-import ollama
 
 from chroma_config import CHROMA_CONFIG, INDEXER_CONFIG, OLLAMA_CONFIG
-from rag_common import chunk_hash, create_chunks, embed_text, normalize_text, read_markdown
+from rag_common import (
+    build_ollama_client,
+    chunk_hash,
+    create_chunks,
+    embed_text,
+    normalize_text,
+    read_markdown,
+)
 
 logging.getLogger("chromadb").setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
@@ -68,7 +74,7 @@ def main():
     parser.add_argument("markdown_file", help="Path to the Markdown file to index")
     args = parser.parse_args()
 
-    client = ollama.Client(host=OLLAMA_CONFIG["host"], timeout=OLLAMA_CONFIG["timeout"])
+    client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
     chroma_client = chromadb.PersistentClient(path=CHROMA_CONFIG["db_path"])
     collection = chroma_client.get_or_create_collection(name=CHROMA_CONFIG["collection"])
 

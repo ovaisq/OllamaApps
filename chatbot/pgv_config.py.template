@@ -21,7 +21,10 @@ OLLAMA_CONFIG = {
     'host': os.getenv('OLLAMA_HOST', 'http://'),
     'chat_model': os.getenv('CHAT_MODEL', 'phi4-mini'),
     'embedding_model': os.getenv('EMBEDDING_MODEL', 'snowflake-arctic-embed'),
-    'timeout': float(os.getenv('OLLAMA_TIMEOUT', 30)),
+    # 30s is too short for a cold model load or a large model's first token;
+    # this covers both the embedding call and the (usually much longer,
+    # streamed) chat call since they share one client.
+    'timeout': float(os.getenv('OLLAMA_TIMEOUT', 300)),
     'retry_attempts': int(os.getenv('OLLAMA_RETRY_ATTEMPTS', 3)),
 }
 

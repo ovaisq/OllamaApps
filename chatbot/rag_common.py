@@ -12,6 +12,21 @@ from typing import Any, Callable, List, Optional, Tuple, Type
 logger = logging.getLogger(__name__)
 
 
+def build_ollama_client(host: str, timeout: float) -> Any:
+    """Build an ollama.Client with a short connect timeout (fail fast if the
+    host is unreachable) but a long read timeout (`timeout`) -- chat
+    streaming on a large/cold-loaded model can take far longer than a
+    reasonable connect timeout without actually being stuck.
+    """
+    import httpx
+    import ollama
+
+    return ollama.Client(
+        host=host,
+        timeout=httpx.Timeout(connect=10.0, read=timeout, write=timeout, pool=timeout),
+    )
+
+
 def load_env_file(env_path: Path = None) -> None:
     """Load KEY=VALUE pairs from a .env file into os.environ (existing env
     vars take precedence). Mirrors the no-dependency loader already used in

@@ -7,7 +7,6 @@ from typing import Dict, List
 
 import fastapi
 import gradio as gr
-import ollama
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pgvector import Vector
@@ -16,7 +15,13 @@ from pgvector.psycopg2 import register_vector
 from admin_ui import build_admin_tab
 from auth_routes import register_routes as register_auth_routes
 from pgv_config import CHAT_CONFIG, DB_CONFIG, DB_POOL_CONFIG, OLLAMA_CONFIG
-from rag_common import embed_text, safe_error_message, validate_message, with_retries
+from rag_common import (
+    build_ollama_client,
+    embed_text,
+    safe_error_message,
+    validate_message,
+    with_retries,
+)
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
@@ -36,9 +41,7 @@ class PGVectorChat:
             register_vector(bootstrap_conn, globally=True)
         finally:
             self.pool.putconn(bootstrap_conn)
-        self.ollama_client = ollama.Client(
-            host=OLLAMA_CONFIG["host"], timeout=OLLAMA_CONFIG["timeout"]
-        )
+        self.ollama_client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
 
     @staticmethod
     def _validate_config():

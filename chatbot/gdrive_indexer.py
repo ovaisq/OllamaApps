@@ -71,11 +71,11 @@ def run_pgvector_backend(access_token: str) -> int:
 
 def run_chromadb_backend(access_token: str) -> int:
     import chromadb
-    import ollama
     from chroma_config import CHROMA_CONFIG, OLLAMA_CONFIG
     from chromadb_indexer import index_text
+    from rag_common import build_ollama_client
 
-    client = ollama.Client(host=OLLAMA_CONFIG["host"], timeout=OLLAMA_CONFIG["timeout"])
+    client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
     chroma_client = chromadb.PersistentClient(path=CHROMA_CONFIG["db_path"])
     collection = chroma_client.get_or_create_collection(name=CHROMA_CONFIG["collection"])
 

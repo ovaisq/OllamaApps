@@ -13,12 +13,17 @@ from typing import Dict, List
 import chromadb
 import fastapi
 import gradio as gr
-import ollama
 
 from admin_ui import build_admin_tab
 from auth_routes import register_routes as register_auth_routes
 from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
-from rag_common import embed_text, safe_error_message, validate_message, with_retries
+from rag_common import (
+    build_ollama_client,
+    embed_text,
+    safe_error_message,
+    validate_message,
+    with_retries,
+)
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
@@ -29,9 +34,7 @@ logger = logging.getLogger(__name__)
 
 class ChromaChat:
     def __init__(self):
-        self.ollama_client = ollama.Client(
-            host=OLLAMA_CONFIG["host"], timeout=OLLAMA_CONFIG["timeout"]
-        )
+        self.ollama_client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
         self.chroma_client = chromadb.PersistentClient(path=CHROMA_CONFIG["db_path"])
         self._collection_lock = threading.Lock()
         self._collection = self.chroma_client.get_collection(name=CHROMA_CONFIG["collection"])

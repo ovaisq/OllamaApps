@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from rag_common import (
+    build_ollama_client,
     chunk_hash,
     create_chunks,
     extract_text_from_upload,
@@ -11,6 +12,17 @@ from rag_common import (
     validate_message,
     with_retries,
 )
+
+
+def test_build_ollama_client_uses_short_connect_and_long_read_timeout():
+    """Regression test: a single shared float timeout caused chat streaming
+    on a large/cold-loaded model to time out (30s wasn't enough), so the
+    connect and read timeouts must be split.
+    """
+    client = build_ollama_client("http://example.com:11434", 300.0)
+    timeout = client._client.timeout
+    assert timeout.connect == 10.0
+    assert timeout.read == 300.0
 
 
 def test_create_chunks_actually_splits_text():
