@@ -10,6 +10,7 @@ import gradio as gr
 import ollama
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
+from pgvector import Vector
 from pgvector.psycopg2 import register_vector
 
 from admin_ui import build_admin_tab
@@ -88,7 +89,7 @@ class PGVectorChat:
                 cursor.execute(
                     "SELECT chunk FROM markdown_chunks "
                     "ORDER BY embedding <-> %s LIMIT %s",
-                    (query_embedding, CHAT_CONFIG["top_k"]),
+                    (Vector(query_embedding), CHAT_CONFIG["top_k"]),
                 )
                 return [row[0] for row in cursor.fetchall()]
 

@@ -20,6 +20,9 @@ DRIVE_CONFIG = {
     'folder_id': os.getenv('GDRIVE_FOLDER_ID', ''),
     # Where the long-lived refresh token is persisted between runs.
     'token_store_path': os.getenv('GDRIVE_TOKEN_STORE', './gdrive_token.json'),
+    # Files are fetched/embedded/indexed concurrently, this many at a time.
+    # Bounded by how many concurrent requests your Ollama server can serve.
+    'max_workers': int(os.getenv('GDRIVE_MAX_WORKERS', 2)),
 }
 
 # App login: gates the whole chatbot UI (see auth_routes.py). The same Google

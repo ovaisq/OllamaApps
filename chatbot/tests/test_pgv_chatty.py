@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pgvector import Vector
 
 import pgv_chatty
 
@@ -43,7 +44,11 @@ def test_get_context_chunks_uses_vector_similarity_search(chat):
     sql, params = cursor.execute.call_args.args
     assert "<->" in sql
     assert "ORDER BY" in sql
-    assert params[0] == [0.1, 0.2, 0.3]
+    # Must be a pgvector.Vector, not a plain list: psycopg2 has no adapter
+    # for plain lists, so a bare list gets sent as a numeric[] literal and
+    # `vector <-> numeric[]` fails in Postgres with UndefinedFunction.
+    assert isinstance(params[0], Vector)
+    assert params[0].to_list() == pytest.approx([0.1, 0.2, 0.3])
 
 
 def test_get_context_chunks_does_not_order_by_length(chat):

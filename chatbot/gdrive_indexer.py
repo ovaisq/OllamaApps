@@ -10,6 +10,7 @@ this indexer as a cron/manual job, same as pgv_indexer.py/chromadb_indexer.py.
 """
 import argparse
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from gdrive_config import DRIVE_CONFIG, GOOGLE_CONFIG
 from gdrive_auth import refresh_access_token
@@ -31,22 +32,41 @@ def get_access_token() -> str:
     )
 
 
+def _process_files_concurrently(files, process_one) -> int:
+    """Run process_one(file) -> int across files with DRIVE_CONFIG['max_workers']
+    threads. One file's failure is logged and skipped, not fatal to the rest.
+    """
+    total = 0
+    with ThreadPoolExecutor(max_workers=DRIVE_CONFIG["max_workers"]) as pool:
+        futures = {pool.submit(process_one, f): f for f in files}
+        for future in futures:
+            f = futures[future]
+            try:
+                total += future.result()
+            except Exception:
+                logger.exception("Failed to index Drive file %s", f["name"])
+    return total
+
+
 def run_pgvector_backend(access_token: str) -> int:
     from pgv_config import DB_CONFIG
     from pgv_indexer import index_text
     import psycopg2
 
-    conn = psycopg2.connect(**DB_CONFIG)
-    total = 0
-    try:
-        for f in list_files(access_token, DRIVE_CONFIG["folder_id"]):
-            text = fetch_file_text(access_token, f["id"], f["mimeType"])
-            if not text or not text.strip():
-                continue
-            total += index_text(text, f["name"], conn)
-    finally:
-        conn.close()
-    return total
+    def process_one(f) -> int:
+        text = fetch_file_text(access_token, f["id"], f["mimeType"])
+        if not text or not text.strip():
+            return 0
+        # Each worker thread gets its own connection: psycopg2 connections
+        # aren't safe to share across concurrent threads.
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            return index_text(text, f["name"], conn)
+        finally:
+            conn.close()
+
+    files = list(list_files(access_token, DRIVE_CONFIG["folder_id"]))
+    return _process_files_concurrently(files, process_one)
 
 
 def run_chromadb_backend(access_token: str) -> int:
@@ -59,13 +79,14 @@ def run_chromadb_backend(access_token: str) -> int:
     chroma_client = chromadb.PersistentClient(path=CHROMA_CONFIG["db_path"])
     collection = chroma_client.get_or_create_collection(name=CHROMA_CONFIG["collection"])
 
-    total = 0
-    for f in list_files(access_token, DRIVE_CONFIG["folder_id"]):
+    def process_one(f) -> int:
         text = fetch_file_text(access_token, f["id"], f["mimeType"])
         if not text or not text.strip():
-            continue
-        total += index_text(text, f["name"], collection, client)
-    return total
+            return 0
+        return index_text(text, f["name"], collection, client)
+
+    files = list(list_files(access_token, DRIVE_CONFIG["folder_id"]))
+    return _process_files_concurrently(files, process_one)
 
 
 def main():
