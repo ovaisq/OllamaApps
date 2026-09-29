@@ -138,3 +138,10 @@ def test_sync_gate_releases_after_failed_sync():
     gate.finish()
 
     assert gate.try_begin() is True
+
+
+def test_system_prompt_treats_user_corrections_as_authoritative():
+    """Corrections taught via the Admin tab only change answers if the model
+    is told to treat [user-corrections] chunks as overriding documents."""
+    assert "user-corrections" in rag_common.CHAT_SYSTEM_PROMPT
+    assert "override" in rag_common.CHAT_SYSTEM_PROMPT

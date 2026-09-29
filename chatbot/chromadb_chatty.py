@@ -99,6 +99,18 @@ class ChromaChat:
                 "CREATE INDEX IF NOT EXISTS chat_history_user_email_idx "
                 "ON chat_history (user_email, created_at)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_email TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
     def save_message(self, user_email: str, role: str, content: str) -> None:
         with self._history_connection() as conn:
@@ -121,6 +133,42 @@ class ChromaChat:
     def clear_history(self, user_email: str) -> None:
         with self._history_connection() as conn:
             conn.execute("DELETE FROM chat_history WHERE user_email = ?", (user_email,))
+
+    def record_feedback(self, history: List[Dict], like_data: "gr.LikeData",
+                        request: "gr.Request" = None) -> None:
+        """Persist a Like/Dislike on an assistant message together with the
+        question it answered -- the reviewable record of what the bot got
+        wrong (and the seed for teaching a correction in the Admin tab).
+        Never raises: failing to record feedback must not break the chat.
+        """
+        try:
+            idx = like_data.index
+            if isinstance(idx, tuple):
+                idx = idx[0]
+            answer = history[idx].get("content", "") if isinstance(idx, int) and 0 <= idx < len(history) else ""
+            question = ""
+            for message in reversed(history[:idx]):
+                if message.get("role") == "user":
+                    question = message.get("content", "")
+                    break
+            rating = (
+                "like" if like_data.liked is True
+                else "dislike" if like_data.liked is False
+                else str(like_data.liked)
+            )
+            user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"]) or "anonymous"
+            with self._history_connection() as conn:
+                conn.execute(
+                    "INSERT INTO feedback (user_email, question, answer, rating) "
+                    "VALUES (?, ?, ?, ?)",
+                    (user_email, question, answer, rating),
+                )
+            logger.info(
+                "Recorded %s feedback from %s on the answer to %r",
+                rating, user_email, question[:80],
+            )
+        except Exception:
+            logger.warning("Failed to record chat feedback", exc_info=True)
 
     @property
     def collection(self):
@@ -386,6 +434,9 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
 
             msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
             stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+            # Like/Dislike on answers -> persisted for review + learning
+            # (the Admin tab's "Teach a correction" turns them into fixes).
+            chatbot.like(chat.record_feedback, chatbot)
 
             clear_btn = gr.Button("Clear History")
             clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state])

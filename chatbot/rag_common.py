@@ -411,6 +411,7 @@ How to answer:
 - If it's a specific factual question, answer it directly using the context, and say which document it came from.
 - Base your answer only on the provided context. If none of it is actually relevant to the question, say so plainly instead of guessing or claiming there's "no mention" when you've only seen a handful of excerpts, not the full document.
 - Do not answer general-knowledge questions from your own training data as if they came from the context. If the context has nothing relevant, say you found nothing relevant in the indexed documents -- don't substitute your own (possibly wrong) general knowledge as if it were grounded.
+- Context chunks labeled [user-corrections] are corrections a user reported after a wrong answer. Treat them as the authoritative truth about their question and let them override any conflicting document content.
 """
 
 

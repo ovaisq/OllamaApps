@@ -25,3 +25,14 @@ CREATE TABLE IF NOT EXISTS chat_history (
 );
 CREATE INDEX IF NOT EXISTS chat_history_user_email_idx
 ON chat_history (user_email, created_at);
+
+-- Like/Dislike feedback on assistant answers; the Admin tab's
+-- "Teach a correction" panel turns disliked Q&As into fixed knowledge.
+CREATE TABLE IF NOT EXISTS feedback (
+    id BIGSERIAL PRIMARY KEY,
+    user_email TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    rating TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);

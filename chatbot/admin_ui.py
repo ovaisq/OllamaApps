@@ -67,6 +67,33 @@ def get_index_stats(count_fn) -> str:
     return f"Total indexed chunks: {total}"
 
 
+def teach_correction(question: str, answer: str, index_text_fn, request=None) -> str:
+    """Index a user-reported correction as first-class knowledge so future
+    similar questions retrieve it as context (this is how the app "learns"
+    from mistakes users point out).
+
+    index_text_fn(text, source, extra_metadata=None) -> int chunks_added.
+    """
+    question = (question or "").strip()
+    answer = (answer or "").strip()
+    if not question or not answer:
+        return "Fill in both the question it got wrong and the correct answer."
+    from app_session import get_email_from_request
+    from gdrive_config import AUTH_CONFIG
+
+    user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"]) or "unknown"
+    added = index_text_fn(
+        f"Question: {question}\nCorrect answer: {answer}",
+        source="user-corrections",
+        extra_metadata={"type": "correction", "user": user_email},
+    )
+    logger.info("User %s taught a correction for %r (%d chunks)", user_email, question[:60], added)
+    return (
+        "Thanks! Correction saved and indexed -- future similar questions "
+        f"will answer from it ({added} chunk(s) added)."
+    )
+
+
 def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
     """Adds an 'Admin' tab to the enclosing gr.Blocks context."""
     with gr.Tab("Admin"):
@@ -84,6 +111,21 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
         drive_status = gr.Markdown()
         sync_btn = gr.Button("Sync Google Drive now")
         sync_btn.click(lambda: sync_drive_now(drive_sync_fn), None, drive_status)
+
+        gr.Markdown(
+            "## Teach Chatty a correction\n"
+            "Did it get something wrong? Tell it the right answer here and it "
+            "will use the correction for similar questions from now on."
+        )
+        wrong_question = gr.Textbox(label="A question it answered wrong")
+        correct_answer = gr.Textbox(label="The correct answer", lines=3)
+        teach_status = gr.Markdown()
+        teach_btn = gr.Button("Teach this correction")
+
+        def _teach(question, answer, request: gr.Request = None):
+            return teach_correction(question, answer, index_text_fn, request)
+
+        teach_btn.click(_teach, [wrong_question, correct_answer], teach_status)
 
         gr.Markdown("## Index status")
         stats = gr.Markdown()

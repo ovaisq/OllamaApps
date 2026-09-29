@@ -69,6 +69,7 @@ class PGVectorChat:
             keep_alive=OLLAMA_CONFIG["keep_alive"],
         )
         self._ensure_chat_history_schema()
+        self._ensure_feedback_schema()
         # Serializes Drive syncs: one click already spawns a worker pool;
         # a second concurrent click would re-embed the whole corpus again.
         self._sync_gate = DriveSyncGate()
@@ -127,6 +128,63 @@ class PGVectorChat:
             with conn.cursor() as cursor:
                 cursor.execute("DELETE FROM chat_history WHERE user_email = %s", (user_email,))
             conn.commit()
+
+    def _ensure_feedback_schema(self):
+        """Like/Dislike feedback on answers (created idempotently at startup
+        so an existing deployment self-migrates, same as chat_history)."""
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS feedback (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_email TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        rating TEXT NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                    """
+                )
+            conn.commit()
+
+    def record_feedback(self, history: List[Dict], like_data: "gr.LikeData",
+                        request: "gr.Request" = None) -> None:
+        """Persist a Like/Dislike on an assistant message together with the
+        question it answered -- the reviewable record of what the bot got
+        wrong (and the seed for teaching a correction in the Admin tab).
+        Never raises: failing to record feedback must not break the chat.
+        """
+        try:
+            idx = like_data.index
+            if isinstance(idx, tuple):
+                idx = idx[0]
+            answer = history[idx].get("content", "") if isinstance(idx, int) and 0 <= idx < len(history) else ""
+            question = ""
+            for message in reversed(history[:idx]):
+                if message.get("role") == "user":
+                    question = message.get("content", "")
+                    break
+            rating = (
+                "like" if like_data.liked is True
+                else "dislike" if like_data.liked is False
+                else str(like_data.liked)
+            )
+            user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"]) or "anonymous"
+            with self._connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO feedback (user_email, question, answer, rating) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (user_email, question, answer, rating),
+                    )
+                conn.commit()
+            logger.info(
+                "Recorded %s feedback from %s on the answer to %r",
+                rating, user_email, question[:80],
+            )
+        except Exception:
+            logger.warning("Failed to record chat feedback", exc_info=True)
 
     @staticmethod
     def _validate_config():
@@ -397,6 +455,9 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
 
             msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
             stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+            # Like/Dislike on answers -> persisted for review + learning
+            # (the Admin tab's "Teach a correction" turns them into fixes).
+            chatbot.like(chat.record_feedback, chatbot)
 
             clear_btn = gr.Button("Clear History")
             clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state])

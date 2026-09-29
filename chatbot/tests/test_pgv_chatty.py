@@ -181,6 +181,51 @@ def test_scroll_follows_output_only_while_user_is_at_bottom(chat):
     ), "SMART_SCROLL_JS is not wired to the load event"
 
 
+def test_like_dislike_is_recorded_with_its_question(chat):
+    """Like/Dislike on an answer must persist the answer AND the question it
+    answered -- that pair is what an admin reviews to see what the bot got
+    wrong."""
+    instance, cursor = chat
+    like_data = MagicMock(index=3, liked=False)
+    history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "wrong answer"},
+    ]
+
+    instance.record_feedback(history, like_data)
+
+    sql, params = cursor.execute.call_args.args
+    assert "INSERT INTO feedback" in sql
+    assert params[0] == "anonymous"
+    assert params[1] == "second question"
+    assert params[2] == "wrong answer"
+    assert params[3] == "dislike"
+
+
+def test_record_feedback_never_raises(chat):
+    """A Like/Dislike click must never break the chat, even with junk
+    event data."""
+    instance, cursor = chat
+    like_data = MagicMock()
+    like_data.index = MagicMock(side_effect=TypeError("bad event data"))
+
+    instance.record_feedback([{"role": "assistant", "content": "x"}], like_data)
+
+
+def test_like_event_is_wired_to_feedback_recording(chat):
+    instance, cursor = chat
+    app = pgv_chatty.build_app(instance)
+
+    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
+    config = mount.app.blocks.config
+    assert any(
+        any(isinstance(t, (list, tuple)) and t[1] == "like" for t in d.get("targets", []))
+        for d in config["dependencies"]
+    ), "the chatbot's like event is not wired to feedback recording"
+
+
 def test_respond_rejects_oversized_message_without_calling_llm(chat):
     instance, _cursor = chat
     long_message = "x" * 100000

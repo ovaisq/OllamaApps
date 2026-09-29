@@ -164,6 +164,48 @@ def test_scroll_follows_output_only_while_user_is_at_bottom(chat):
     ), "SMART_SCROLL_JS is not wired to the load event"
 
 
+def test_like_dislike_is_recorded_with_its_question(chat):
+    """Like/Dislike on an answer must persist the answer AND the question it
+    answered, into the real (tmp-dir) sqlite store."""
+    instance, collection, _ollama_client = chat
+    like_data = MagicMock(index=1, liked=False)
+    history = [
+        {"role": "user", "content": "the question"},
+        {"role": "assistant", "content": "the wrong answer"},
+    ]
+
+    instance.record_feedback(history, like_data)
+
+    import sqlite3
+    with sqlite3.connect(instance._history_db_path) as conn:
+        rows = conn.execute(
+            "SELECT user_email, question, answer, rating FROM feedback"
+        ).fetchall()
+    assert rows == [("anonymous", "the question", "the wrong answer", "dislike")]
+
+
+def test_record_feedback_never_raises(chat):
+    """A Like/Dislike click must never break the chat, even with junk
+    event data."""
+    instance, _collection, _ollama_client = chat
+    like_data = MagicMock()
+    like_data.index = MagicMock(side_effect=TypeError("bad event data"))
+
+    instance.record_feedback([{"role": "assistant", "content": "x"}], like_data)
+
+
+def test_like_event_is_wired_to_feedback_recording(chat):
+    instance, _collection, _ollama_client = chat
+    app = chromadb_chatty.build_app(instance)
+
+    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
+    config = mount.app.blocks.config
+    assert any(
+        any(isinstance(t, (list, tuple)) and t[1] == "like" for t in d.get("targets", []))
+        for d in config["dependencies"]
+    ), "the chatbot's like event is not wired to feedback recording"
+
+
 def test_respond_hides_internal_error_details_from_user(chat):
     instance, _collection, ollama_client = chat
     ollama_client.embeddings.side_effect = ConnectionError("db-password=hunter2 leaked")
