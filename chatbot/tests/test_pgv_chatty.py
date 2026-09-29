@@ -12,8 +12,8 @@ def make_fake_pool(fetchall_return=None):
     cursor.fetchall.return_value = fetchall_return or []
     # PGVectorChat.__init__ runs pgv_schema's dimension check, which reads
     # atttypmod; report a matching dimension so the fixture exercises the
-    # no-migration path.
-    cursor.fetchone.return_value = (pgv_chatty.OLLAMA_CONFIG["embedding_dim"] + 4,)
+    # no-migration path. (pgvector stores the raw dim in atttypmod.)
+    cursor.fetchone.return_value = (pgv_chatty.OLLAMA_CONFIG["embedding_dim"],)
     cursor.__enter__.return_value = cursor
     cursor.__exit__.return_value = False
 

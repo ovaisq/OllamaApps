@@ -5,9 +5,10 @@ import pytest
 
 import pgv_schema
 
-# pgvector stores dim + 4 (the varlena header) in pg_attribute.atttypmod.
+# pgvector stores the dimension directly in atttypmod (vector(1024) ->
+# atttypmod 1024, verified against pgvector/pgvector:pg16); -1 = unbounded.
 def typmod_for(dim):
-    return (dim + 4,)
+    return (dim,)
 
 
 @pytest.fixture

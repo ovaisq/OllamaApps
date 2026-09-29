@@ -43,9 +43,13 @@ def ensure_markdown_chunks_schema(conn, dim: int, embedding_model: str) -> None:
             "AND attname = 'embedding'"
         )
         typmod = cursor.fetchone()[0]
-        # pgvector stores dim + 4 (the varlena header) in atttypmod;
-        # -1 means the unbounded `vector` type.
-        existing_dim = typmod - 4 if typmod > 0 else None
+        # pgvector stores the dimension directly in atttypmod (verified
+        # against pgvector/pgvector:pg16: vector(1024) -> atttypmod 1024);
+        # -1 means the unbounded `vector` type. Postgres's usual typmod+4
+        # header convention does NOT apply here: subtracting 4 made real
+        # 1024-dim columns read as phantom 1020s, wedging the app on
+        # restart after a perfectly good sync.
+        existing_dim = typmod if typmod > 0 else None
         if existing_dim == dim:
             _create_hnsw_index(cursor)
             conn.commit()
@@ -60,7 +64,10 @@ def ensure_markdown_chunks_schema(conn, dim: int, embedding_model: str) -> None:
                 f"were embedded by a different model and cannot be mixed with "
                 f"'{embedding_model}' embeddings. TRUNCATE markdown_chunks "
                 f"and re-index (restart the app, then re-run the Drive/"
-                f"markdown indexer), or switch EMBEDDING_MODEL back."
+                f"markdown indexer), or switch EMBEDDING_MODEL back. "
+                f"NOTE: EMBEDDING_DIM must equal the model's output dimension "
+                f"(1024 for qwen3-embedding:0.6b) -- never set it to match "
+                f"the old column's size, or every insert will fail."
             )
         # Still empty, so nothing of value is lost: drop the hnsw index
         # (ALTER TYPE can't run under one), resize, recreate.
