@@ -169,9 +169,34 @@ def test_detect_mentioned_sources_routes_named_documents():
     ]
 
 
+def test_detect_mentioned_sources_matches_tokens_in_any_order():
+    """Substring matching missed real questions: 'Show Ovais resume from
+    2019' never contains '2019_RESUME.pdf' verbatim (different word
+    order, no extension). Token matching must catch it -- while NOT
+    routing to the other resume files it doesn't fully name."""
+    sources = [
+        "05_2023_OQ_Exec_Resume.pdf",
+        "2019_RESUME.pdf",
+        "Kona April 2026",
+        "Teal Health Defect Report November 19, 2024.pdf",
+    ]
+    assert rag_common.detect_mentioned_sources(
+        "Show Ovais resume from 2019", sources
+    ) == ["2019_RESUME.pdf"]
+
+
+def test_detect_mentioned_sources_requires_all_significant_tokens():
+    """A query using only some of a document's name tokens must not
+    hijack retrieval toward that document."""
+    sources = ["Teal Health Defect Report November 19, 2024.pdf"]
+    assert rag_common.detect_mentioned_sources(
+        "what do the defect reports say about screening", sources
+    ) == []
+
+
 def test_detect_mentioned_sources_ignores_tiny_source_names():
-    """A 1-char source like 'R' substring-matches almost any query and
-    would hijack retrieval."""
+    """A 1-char source like 'R' has no significant tokens and can never
+    hijack retrieval."""
     assert rag_common.detect_mentioned_sources("what is R about?", ["R"]) == []
 
 

@@ -413,32 +413,39 @@ def normalize_source_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip()).lower()
 
 
-def detect_mentioned_sources(query: str, sources: List[str], min_length: int = 4) -> List[str]:
+_SOURCE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _source_tokens(name: str) -> List[str]:
+    """Significant tokens of a document name: 3+ chars, file extension
+    stripped ("2019_RESUME.pdf" -> ["2019", "resume"])."""
+    stem = os.path.splitext(name or "")[0]
+    return [t for t in _SOURCE_TOKEN_RE.findall(normalize_source_name(stem)) if len(t) >= 3]
+
+
+def detect_mentioned_sources(query: str, sources: List[str]) -> List[str]:
     """Return indexed source names the query explicitly mentions.
 
-    Pure vector ranking can bury a document the user NAMED: when the
-    corpus is dominated by dense numeric chunks (spreadsheet dumps),
-    queries with a numeric/date flavor land inside that cloud and the
-    named document's chunks never reach the top-k -- "what's Kona April
-    2026 about?" returned bq-results rows instead. An explicit name match
-    is a far stronger intent signal than embedding distance, so named
-    sources get routed to the front of retrieval.
+    Matching is token-based, not substring: a source matches when every
+    significant token of its name (3+ chars, extension stripped) appears
+    somewhere in the query, in any order. Substring matching missed real
+    questions -- "Show Ovais resume from 2019" never contains
+    "2019_resume.pdf" verbatim, but the query carries both of its tokens
+    (2019, resume) -- and pure vector ranking can bury a named document
+    when the corpus is dominated by dense numeric chunks (the original
+    "Kona April 2026" failure).
 
-    Args:
-        query: The user's question.
-        sources: Known source names from the index.
-        min_length: Sources shorter than this never match (a 1-char doc
-            like "R" would substring-match almost any query).
-
-    Returns:
-        The subset of `sources` the query names, in their given order.
+    Returns matched sources in their given order. Tiny names ("R") have
+    no significant tokens and never match; a query naming several
+    documents routes to all of them.
     """
-    q = normalize_source_name(query)
-    return [
-        source for source in sources
-        if len(normalize_source_name(source)) >= min_length
-        and normalize_source_name(source) in q
-    ]
+    query_tokens = set(_SOURCE_TOKEN_RE.findall(normalize_source_name(query)))
+    matched = []
+    for source in sources:
+        tokens = _source_tokens(source)
+        if tokens and all(t in query_tokens for t in tokens):
+            matched.append(source)
+    return matched
 
 
 def is_low_information(text: str, min_alpha_ratio: float = 0.3) -> bool:
