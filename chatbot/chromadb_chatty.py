@@ -453,16 +453,24 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
             stop_btn = gr.Button("Stop Chat")
             state = gr.State(value={})
 
-            msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
-            stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+            # show_progress: "full" (default) renders the runtime timer in
+            # two places at once (upper-right corner + a spinner over the
+            # output components). "minimal" = corner timer only; the
+            # typing dots remain the in-bubble activity cue.
+            msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state],
+                       queue=True, show_progress="minimal")
+            stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state],
+                           show_progress="hidden")
             # Like/Dislike on answers -> persisted for review + learning
             # (the Admin tab's "Teach a correction" turns them into fixes).
-            chatbot.like(chat.record_feedback, chatbot)
+            chatbot.like(chat.record_feedback, chatbot, show_progress="hidden")
 
             clear_btn = gr.Button("Clear History")
-            clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state])
+            clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state],
+                            show_progress="hidden")
 
-            blocks.load(chat.load_history_ui, None, chatbot, js=SMART_SCROLL_JS)
+            blocks.load(chat.load_history_ui, None, chatbot, js=SMART_SCROLL_JS,
+                        show_progress="hidden")
 
         build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
 

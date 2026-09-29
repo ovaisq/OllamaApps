@@ -240,6 +240,33 @@ def test_stream_with_no_text_yields_placeholder_not_frozen_dots(chat):
     assert "no response content" in outputs[-1][0][-1]["content"]
 
 
+def test_progress_timer_shows_in_one_place(chat):
+    """Gradio's default show_progress='full' renders the runtime timer in
+    two places at once (upper-right corner + a spinner over the output
+    components). The chat event must use 'minimal' (corner timer only --
+    the typing dots are the in-bubble cue), and quick UI actions must be
+    'hidden' so they don't flash timers."""
+    instance, collection, ollama_client = chat
+    app = chromadb_chatty.build_app(instance)
+
+    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
+    deps = mount.app.blocks.config["dependencies"]
+
+    submit_dep = next(
+        d for d in deps
+        if any(isinstance(t, (list, tuple)) and t[1] == "submit" for t in d["targets"])
+    )
+    assert submit_dep["show_progress"] == "minimal"
+    like_dep = next(
+        d for d in deps
+        if any(isinstance(t, (list, tuple)) and t[1] == "like" for t in d["targets"])
+    )
+    assert like_dep["show_progress"] == "hidden"
+    assert all(d["show_progress"] in ("minimal", "hidden") for d in deps), (
+        "no event may use 'full' progress (dual timer)"
+    )
+
+
 def test_respond_hides_internal_error_details_from_user(chat):
     instance, _collection, ollama_client = chat
     ollama_client.embeddings.side_effect = ConnectionError("db-password=hunter2 leaked")
