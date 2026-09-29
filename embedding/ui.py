@@ -123,7 +123,7 @@ port = CONFIG.get('psqldb', 'port')
 
 OLLAMA_HOST = CONFIG.get('ai', 'OLLAMA_HOST')
 LLM = CONFIG.get('ai', 'LLM') or "phi4"
-EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL = "qwen3-embedding:0.6b"  # 1024-dim output (nomic-embed-text was 768)
 
 SERVICE_VERSION = CONFIG.get('service', 'version')
 

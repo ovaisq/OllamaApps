@@ -1,6 +1,6 @@
 {
     "embeddings": {
-        "nomic-embed-text": 0.0002
+        "qwen3-embedding:0.6b": 0.0002
     },
     "chat": {
 		"phi4": {
