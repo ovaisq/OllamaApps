@@ -5,5 +5,6 @@ gdrive_token.json
 .venv/
 __pycache__/
 chroma_db/
+chat_history.sqlite3
 *.pyc
 .env

@@ -6,10 +6,17 @@ import chromadb_chatty
 
 
 @pytest.fixture
-def chat():
+def chat(tmp_path):
     mock_ollama_client = MagicMock()
+    # Real (but tmp-dir, hermetic) sqlite chat-history file: exercising the
+    # real file I/O here catches schema/query bugs that a mocked connection
+    # would hide, without leaving stray chat_history.sqlite3 files around.
     with patch("chromadb_chatty.build_ollama_client", return_value=mock_ollama_client), \
-         patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls:
+         patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls, \
+         patch(
+             "chromadb_chatty.CHROMA_CONFIG",
+             {**chromadb_chatty.CHROMA_CONFIG, "db_path": str(tmp_path / "chroma_db")},
+         ):
         mock_collection = MagicMock()
         mock_chroma_cls.return_value.get_collection.return_value = mock_collection
         instance = chromadb_chatty.ChromaChat()
@@ -124,6 +131,79 @@ def test_get_answer_stream_routes_catalog_queries_away_from_embedding_search(cha
     ollama_client.embeddings.assert_not_called()
     messages = ollama_client.chat.call_args.kwargs["messages"]
     assert "Engineering Reports" in messages[1]["content"]
+
+
+def test_save_and_load_history_round_trips(chat):
+    instance, _collection, _ollama_client = chat
+    instance.save_message("user@example.com", "user", "hi")
+    instance.save_message("user@example.com", "assistant", "hello there")
+    instance.save_message("someone-else@example.com", "user", "not mine")
+
+    history = instance.load_history("user@example.com")
+
+    assert history == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello there"},
+    ]
+
+
+def test_clear_history_only_clears_that_user(chat):
+    instance, _collection, _ollama_client = chat
+    instance.save_message("user@example.com", "user", "hi")
+    instance.save_message("someone-else@example.com", "user", "keep me")
+
+    instance.clear_history("user@example.com")
+
+    assert instance.load_history("user@example.com") == []
+    assert instance.load_history("someone-else@example.com") == [{"role": "user", "content": "keep me"}]
+
+
+def test_respond_persists_messages_for_identified_user(chat):
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {
+        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
+    }
+    ollama_client.chat.return_value = iter([{"message": {"content": "hi there"}}])
+
+    with patch("chromadb_chatty.get_email_from_request", return_value="user@example.com"):
+        list(instance.respond("hello", [], {}, request=MagicMock()))
+
+    assert instance.load_history("user@example.com") == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+    ]
+
+
+def test_respond_skips_persistence_when_user_not_identified(chat):
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {
+        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
+    }
+    ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
+
+    with patch("chromadb_chatty.get_email_from_request", return_value=None):
+        list(instance.respond("hello", [], {}))
+
+    assert instance.load_history("anyone@example.com") == []
+
+
+def test_load_history_ui_returns_empty_for_unauthenticated_request(chat):
+    instance, _collection, _ollama_client = chat
+    with patch("chromadb_chatty.get_email_from_request", return_value=None):
+        assert instance.load_history_ui(MagicMock()) == []
+
+
+def test_clear_chat_ui_clears_persisted_history_for_identified_user(chat):
+    instance, _collection, _ollama_client = chat
+    instance.save_message("user@example.com", "user", "hi")
+
+    with patch("chromadb_chatty.get_email_from_request", return_value="user@example.com"):
+        result = instance.clear_chat_ui(MagicMock())
+
+    assert result == ([], "", {})
+    assert instance.load_history("user@example.com") == []
 
 
 def test_stop_chat_only_stops_its_own_session(chat):

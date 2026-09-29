@@ -7,6 +7,7 @@ conversation history, context retrieval, and real-time streaming of responses.
 """
 import logging
 import os
+import sqlite3
 import threading
 from typing import Dict, List, Optional, Tuple
 
@@ -15,8 +16,10 @@ import fastapi
 import gradio as gr
 
 from admin_ui import build_admin_tab
+from app_session import get_email_from_request
 from auth_routes import register_routes as register_auth_routes
 from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
+from gdrive_config import AUTH_CONFIG
 from rag_common import (
     CATEGORY_MIME_TYPES,
     TYPING_INDICATOR_CSS,
@@ -47,6 +50,57 @@ class ChromaChat:
         self._stop_reload = threading.Event()
         self._reload_thread = threading.Thread(target=self._background_reloader, daemon=True)
         self._reload_thread.start()
+
+        # No relational DB in this backend, so chat history lives in its own
+        # small SQLite file (stdlib, no new dependency) alongside the Chroma
+        # persistent store rather than inside the vector collection.
+        self._history_db_path = os.path.join(
+            os.path.dirname(os.path.abspath(CHROMA_CONFIG["db_path"])), "chat_history.sqlite3"
+        )
+        self._ensure_chat_history_schema()
+
+    def _history_connection(self):
+        return sqlite3.connect(self._history_db_path)
+
+    def _ensure_chat_history_schema(self):
+        with self._history_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_email TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS chat_history_user_email_idx "
+                "ON chat_history (user_email, created_at)"
+            )
+
+    def save_message(self, user_email: str, role: str, content: str) -> None:
+        with self._history_connection() as conn:
+            conn.execute(
+                "INSERT INTO chat_history (user_email, role, content) VALUES (?, ?, ?)",
+                (user_email, role, content),
+            )
+
+    def load_history(self, user_email: str, limit: int = 200) -> List[Dict]:
+        with self._history_connection() as conn:
+            rows = conn.execute(
+                "SELECT role, content FROM ("
+                "  SELECT role, content, created_at, id FROM chat_history"
+                "  WHERE user_email = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+                ") sub ORDER BY created_at ASC, id ASC",
+                (user_email, limit),
+            ).fetchall()
+        return [{"role": role, "content": content} for role, content in rows]
+
+    def clear_history(self, user_email: str) -> None:
+        with self._history_connection() as conn:
+            conn.execute("DELETE FROM chat_history WHERE user_email = ?", (user_email,))
 
     @property
     def collection(self):
@@ -169,16 +223,19 @@ class ChromaChat:
             answer += chunk.get("message", {}).get("content", "")
             yield answer
 
-    def respond(self, message: str, chat_history: List[Dict], state: Dict):
+    def respond(self, message: str, chat_history: List[Dict], state: Dict, request: gr.Request = None):
         """Handle a new message. `state` is a per-session dict holding this
         session's own stop Event so one user's Stop button can't affect
-        another user's in-flight stream.
+        another user's in-flight stream. Persists both sides of the
+        exchange for the logged-in user (from the session cookie), if the
+        request can be identified.
         """
         if state is None:
             state = {}
         stop_event = state.setdefault("stop_event", threading.Event())
         stop_event.clear()
 
+        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
         chat_history = chat_history or []
 
         try:
@@ -203,11 +260,13 @@ class ChromaChat:
             state,
         )
 
+        final_response = None
         try:
             partial = ""
             for partial in self.get_answer_stream(message, chat_history, stop_event):
                 if stop_event.is_set():
                     break
+                final_response = partial
                 yield (
                     chat_history + [
                         {"role": "user", "content": message},
@@ -217,15 +276,19 @@ class ChromaChat:
                     state,
                 )
         except Exception as e:
-            error_msg = safe_error_message(e, logger)
+            final_response = safe_error_message(e, logger)
             yield (
                 chat_history + [
                     {"role": "user", "content": message},
-                    {"role": "assistant", "content": error_msg},
+                    {"role": "assistant", "content": final_response},
                 ],
                 "",
                 state,
             )
+
+        if user_email and final_response:
+            self.save_message(user_email, "user", message)
+            self.save_message(user_email, "assistant", final_response)
 
     def stop_chat(self, chat_history: List[Dict], state: Dict):
         """Stop current chat response for this session only."""
@@ -234,6 +297,20 @@ class ChromaChat:
         stop_event = state.setdefault("stop_event", threading.Event())
         stop_event.set()
         return (chat_history, "", state)
+
+    def load_history_ui(self, request: gr.Request = None) -> List[Dict]:
+        """Populate the Chat tab with this user's persisted history on page load."""
+        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
+        if not user_email:
+            return []
+        return self.load_history(user_email)
+
+    def clear_chat_ui(self, request: gr.Request = None):
+        """Clear both the visible chat and this user's persisted history."""
+        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
+        if user_email:
+            self.clear_history(user_email)
+        return ([], "", {})
 
     def count_chunks(self) -> int:
         return self.collection.count()
@@ -267,6 +344,11 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
 
             msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
             stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+
+            clear_btn = gr.Button("Clear History")
+            clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state])
+
+            blocks.load(chat.load_history_ui, None, chatbot)
 
         build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
 

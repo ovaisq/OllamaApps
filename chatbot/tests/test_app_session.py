@@ -1,8 +1,11 @@
 import time
+from unittest.mock import MagicMock
 
 import jwt
 
-from app_session import create_session_token, verify_session_token
+from app_session import SESSION_COOKIE, create_session_token, get_email_from_request, verify_session_token
+
+SECRET = "secret-that-is-long-enough-1234567890"
 
 
 def test_round_trips_email():
@@ -31,3 +34,35 @@ def test_rejects_none_token():
 
 def test_rejects_garbage_token():
     assert verify_session_token("not-a-jwt", "secret-that-is-long-enough-1234567890") is None
+
+
+def test_get_email_from_request_reads_dict_like_cookies():
+    token = create_session_token("user@example.com", SECRET, 3600)
+    request = MagicMock(cookies={SESSION_COOKIE: token})
+
+    assert get_email_from_request(request, SECRET) == "user@example.com"
+
+
+def test_get_email_from_request_reads_attribute_style_cookies():
+    """gr.Request wraps cookies in an Obj (attribute access), not always a
+    plain dict, depending on environment -- must support both.
+    """
+    token = create_session_token("user@example.com", SECRET, 3600)
+
+    class CookieObj:
+        pass
+
+    cookies = CookieObj()
+    setattr(cookies, SESSION_COOKIE, token)
+    request = MagicMock(cookies=cookies)
+
+    assert get_email_from_request(request, SECRET) == "user@example.com"
+
+
+def test_get_email_from_request_returns_none_for_no_request():
+    assert get_email_from_request(None, SECRET) is None
+
+
+def test_get_email_from_request_returns_none_when_cookie_missing():
+    request = MagicMock(cookies={})
+    assert get_email_from_request(request, SECRET) is None

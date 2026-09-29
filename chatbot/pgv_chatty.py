@@ -13,8 +13,11 @@ from pgvector import Vector
 from pgvector.psycopg2 import register_vector
 
 from admin_ui import build_admin_tab
+from app_session import get_email_from_request
 from auth_routes import register_routes as register_auth_routes
+from gdrive_config import AUTH_CONFIG
 from pgv_config import CHAT_CONFIG, DB_CONFIG, DB_POOL_CONFIG, OLLAMA_CONFIG
+from pgv_schema import ensure_markdown_chunks_schema
 from rag_common import (
     CATEGORY_MIME_TYPES,
     TYPING_INDICATOR_CSS,
@@ -48,6 +51,62 @@ class PGVectorChat:
         finally:
             self.pool.putconn(bootstrap_conn)
         self.ollama_client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
+        self._ensure_chat_history_schema()
+        with self._connection() as conn:
+            ensure_markdown_chunks_schema(
+                conn, OLLAMA_CONFIG["embedding_dim"], OLLAMA_CONFIG["embedding_model"]
+            )
+
+    def _ensure_chat_history_schema(self):
+        """Idempotent so this self-migrates on an already-initialized DB
+        volume too -- pgvector.sql only runs on a brand-new empty volume,
+        it won't retroactively add this table to an existing deployment.
+        """
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_history (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_email TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                    """
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS chat_history_user_email_idx "
+                    "ON chat_history (user_email, created_at)"
+                )
+            conn.commit()
+
+    def save_message(self, user_email: str, role: str, content: str) -> None:
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO chat_history (user_email, role, content) VALUES (%s, %s, %s)",
+                    (user_email, role, content),
+                )
+            conn.commit()
+
+    def load_history(self, user_email: str, limit: int = 200) -> List[Dict]:
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT role, content FROM ("
+                    "  SELECT role, content, created_at FROM chat_history"
+                    "  WHERE user_email = %s ORDER BY created_at DESC, id DESC LIMIT %s"
+                    ") sub ORDER BY created_at ASC",
+                    (user_email, limit),
+                )
+                return [{"role": role, "content": content} for role, content in cursor.fetchall()]
+
+    def clear_history(self, user_email: str) -> None:
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM chat_history WHERE user_email = %s", (user_email,))
+            conn.commit()
 
     @staticmethod
     def _validate_config():
@@ -193,16 +252,19 @@ class PGVectorChat:
             full_response += content
             yield full_response
 
-    def respond(self, message: str, history: List[Dict], state: Dict):
+    def respond(self, message: str, history: List[Dict], state: Dict, request: gr.Request = None):
         """Handle chat response. `state` is a per-session dict holding this
         session's own stop Event, so one user's Stop button can't affect
-        another user's in-flight stream.
+        another user's in-flight stream. Persists both sides of the
+        exchange to chat_history for the logged-in user (from the session
+        cookie), if the request can be identified.
         """
         if state is None:
             state = {}
         stop_event = state.setdefault("stop_event", threading.Event())
         stop_event.clear()
 
+        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
         new_history = history + [{"role": "user", "content": message}]
 
         try:
@@ -213,18 +275,24 @@ class PGVectorChat:
 
         yield (new_history + [{"role": "assistant", "content": TYPING_INDICATOR_HTML}], "", state)
 
+        final_response = None
         try:
             for partial_response in self.get_answer_stream(message, history, stop_event):
                 if stop_event.is_set():
                     break
+                final_response = partial_response
                 yield (
                     new_history + [{"role": "assistant", "content": partial_response}],
                     "",
                     state,
                 )
         except Exception as e:
-            error_msg = safe_error_message(e, logger)
-            yield (new_history + [{"role": "assistant", "content": error_msg}], "", state)
+            final_response = safe_error_message(e, logger)
+            yield (new_history + [{"role": "assistant", "content": final_response}], "", state)
+
+        if user_email and final_response:
+            self.save_message(user_email, "user", message)
+            self.save_message(user_email, "assistant", final_response)
 
     def stop_chat(self, history: List[Dict], state: Dict):
         """Stop current chat response for this session only."""
@@ -233,6 +301,23 @@ class PGVectorChat:
         stop_event = state.setdefault("stop_event", threading.Event())
         stop_event.set()
         return (history, "", state)
+
+    def load_history_ui(self, request: gr.Request = None) -> List[Dict]:
+        """Populate the Chat tab with this user's persisted history on page
+        load (a fresh gr.State is per-browser-session, so without this a
+        reload looks like history was lost even though it's saved server-side).
+        """
+        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
+        if not user_email:
+            return []
+        return self.load_history(user_email)
+
+    def clear_chat_ui(self, request: gr.Request = None):
+        """Clear both the visible chat and this user's persisted history."""
+        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
+        if user_email:
+            self.clear_history(user_email)
+        return ([], "", {})
 
     def count_chunks(self) -> int:
         with self._connection() as conn:
@@ -272,7 +357,9 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
             stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
 
             clear_btn = gr.Button("Clear History")
-            clear_btn.click(lambda: ([], "", {}), None, [chatbot, msg, state])
+            clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state])
+
+            chatty.load(chat.load_history_ui, None, chatbot)
 
         build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
 

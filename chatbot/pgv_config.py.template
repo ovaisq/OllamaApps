@@ -20,7 +20,13 @@ DB_POOL_CONFIG = {
 OLLAMA_CONFIG = {
     'host': os.getenv('OLLAMA_HOST', 'http://'),
     'chat_model': os.getenv('CHAT_MODEL', 'phi4-mini'),
-    'embedding_model': os.getenv('EMBEDDING_MODEL', 'snowflake-arctic-embed'),
+    'embedding_model': os.getenv('EMBEDDING_MODEL', 'qwen3-embedding:0.6b'),
+    # Output dimension of the embedding model above (qwen3-embedding:0.6b
+    # -> 1024, nomic-embed-text -> 768). Must match the vector(N) column in
+    # pgvector.sql; the app resizes an *empty* markdown_chunks table to
+    # match at startup, but a populated one must be re-indexed after a
+    # model switch (embeddings from different models are incompatible).
+    'embedding_dim': int(os.getenv('EMBEDDING_DIM', 1024)),
     # 30s is too short for a cold model load or a large model's first token;
     # this covers both the embedding call and the (usually much longer,
     # streamed) chat call since they share one client.

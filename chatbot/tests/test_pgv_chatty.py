@@ -10,6 +10,10 @@ def make_fake_pool(fetchall_return=None):
     """Build a fake connection pool whose cursor().execute/fetchall are inspectable."""
     cursor = MagicMock()
     cursor.fetchall.return_value = fetchall_return or []
+    # PGVectorChat.__init__ runs pgv_schema's dimension check, which reads
+    # atttypmod; report a matching dimension so the fixture exercises the
+    # no-migration path.
+    cursor.fetchone.return_value = (pgv_chatty.OLLAMA_CONFIG["embedding_dim"] + 4,)
     cursor.__enter__.return_value = cursor
     cursor.__exit__.return_value = False
 
@@ -150,6 +154,74 @@ def test_get_answer_stream_routes_catalog_queries_away_from_embedding_search(cha
     instance.ollama_client.embeddings.assert_not_called()
     messages = instance.ollama_client.chat.call_args.kwargs["messages"]
     assert "Engineering Reports" in messages[1]["content"]
+
+
+def test_save_message_inserts_row(chat):
+    instance, cursor = chat
+    instance.save_message("user@example.com", "user", "hello")
+
+    sql, params = cursor.execute.call_args.args
+    assert "INSERT INTO chat_history" in sql
+    assert params == ("user@example.com", "user", "hello")
+
+
+def test_load_history_returns_role_content_dicts(chat):
+    instance, cursor = chat
+    cursor.fetchall.return_value = [("user", "hi"), ("assistant", "hello there")]
+
+    history = instance.load_history("user@example.com")
+
+    assert history == [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello there"}]
+
+
+def test_clear_history_deletes_rows_for_user(chat):
+    instance, cursor = chat
+    instance.clear_history("user@example.com")
+
+    sql, params = cursor.execute.call_args.args
+    assert "DELETE FROM chat_history" in sql
+    assert params == ("user@example.com",)
+
+
+def test_respond_persists_messages_for_identified_user(chat):
+    instance, _cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    instance.ollama_client.chat.return_value = iter([{"message": {"content": "hi there"}}])
+
+    with patch("pgv_chatty.get_email_from_request", return_value="user@example.com"), \
+         patch.object(instance, "save_message") as mock_save:
+        list(instance.respond("hello", [], {}, request=MagicMock()))
+
+    mock_save.assert_any_call("user@example.com", "user", "hello")
+    mock_save.assert_any_call("user@example.com", "assistant", "hi there")
+
+
+def test_respond_skips_persistence_when_user_not_identified(chat):
+    instance, _cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    instance.ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
+
+    with patch("pgv_chatty.get_email_from_request", return_value=None), \
+         patch.object(instance, "save_message") as mock_save:
+        list(instance.respond("hello", [], {}))
+
+    mock_save.assert_not_called()
+
+
+def test_load_history_ui_returns_empty_for_unauthenticated_request(chat):
+    instance, _cursor = chat
+    with patch("pgv_chatty.get_email_from_request", return_value=None):
+        assert instance.load_history_ui(MagicMock()) == []
+
+
+def test_clear_chat_ui_clears_persisted_history_for_identified_user(chat):
+    instance, _cursor = chat
+    with patch("pgv_chatty.get_email_from_request", return_value="user@example.com"), \
+         patch.object(instance, "clear_history") as mock_clear:
+        result = instance.clear_chat_ui(MagicMock())
+
+    mock_clear.assert_called_once_with("user@example.com")
+    assert result == ([], "", {})
 
 
 def test_stop_chat_only_stops_its_own_session(chat):

@@ -32,3 +32,19 @@ def verify_session_token(token: str, secret: str) -> Optional[str]:
         logger.debug("Rejecting session token: %s", e)
         return None
     return payload.get("email")
+
+
+def get_email_from_request(request, secret: str) -> Optional[str]:
+    """Extract and verify the session cookie's email from a gr.Request
+    inside a Gradio event handler -- outside FastAPI route/middleware
+    context, so this can't rely on request.state.user_email being set.
+    Used for per-user chat history (whose messages are these?).
+    """
+    if request is None:
+        return None
+    cookies = getattr(request, "cookies", None) or {}
+    if hasattr(cookies, "get"):
+        token = cookies.get(SESSION_COOKIE)
+    else:
+        token = getattr(cookies, SESSION_COOKIE, None)
+    return verify_session_token(token, secret)

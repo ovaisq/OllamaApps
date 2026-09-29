@@ -4,7 +4,11 @@ import os
 OLLAMA_CONFIG = {
     'host': os.getenv('OLLAMA_HOST', 'http://localhost:11434'),
     'chat_model': os.getenv('CHAT_MODEL', 'phi4-mini'),
-    'embedding_model': os.getenv('EMBEDDING_MODEL', 'snowflake-arctic-embed'),
+    # NOTE: a Chroma collection's dimension is pinned by the first
+    # embedding written to it, so switching embedding models (e.g.
+    # nomic-embed-text -> qwen3-embedding:0.6b) requires deleting the
+    # existing CHROMA_DB_PATH and re-indexing.
+    'embedding_model': os.getenv('EMBEDDING_MODEL', 'qwen3-embedding:0.6b'),
     # 30s is too short for a cold model load or a large model's first token;
     # this covers both the embedding call and the (usually much longer,
     # streamed) chat call since they share one client.
