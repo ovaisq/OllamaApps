@@ -12,6 +12,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
+# httpx logs one INFO line per HTTP request, which floods the logs during a
+# full Drive re-index (one embed per chunk) and drowns the app's own
+# progress/error lines. Failures still surface: httpx errors raise into our
+# own log calls. Set before any app imports rag_common.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Shown immediately on submit, before the embedding call/model warm-up/first
 # token -- without it the chat window shows nothing at all for however long
 # retrieval + a cold model load takes, which reads as broken, not just slow.
