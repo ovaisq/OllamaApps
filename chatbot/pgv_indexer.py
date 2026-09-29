@@ -11,6 +11,7 @@ from pgv_config import DB_CONFIG, INDEXER_CONFIG, OLLAMA_CONFIG
 from pgv_utils import (
     read_markdown, create_chunks, embed_text, normalize_text
 )
+from rag_common import build_ollama_client
 
 def setup_logging():
     """Setup logging configuration."""
@@ -43,7 +44,7 @@ def index_text(text: str, source: str, db_connection, extra_metadata: dict = Non
         INDEXER_CONFIG['chunk_overlap']
     )
 
-    client = ollama.Client(host=OLLAMA_CONFIG['host'])
+    client = build_ollama_client(OLLAMA_CONFIG['host'], OLLAMA_CONFIG['timeout'])
 
     with db_connection.cursor() as cursor:
         existing_chunks = get_existing_chunks(cursor)
@@ -52,7 +53,16 @@ def index_text(text: str, source: str, db_connection, extra_metadata: dict = Non
     for chunk in chunks:
         norm_chunk = normalize_text(chunk)
         if norm_chunk not in existing_chunks:
-            embedding = embed_text(client, chunk, OLLAMA_CONFIG['embedding_model'], source)
+            try:
+                embedding = embed_text(client, chunk, OLLAMA_CONFIG['embedding_model'], source)
+            except ollama.ResponseError as e:
+                # e.g. "input length exceeds the context length" on a
+                # token-dense chunk (CSV rows tokenize heavier than prose,
+                # so char-based chunk_size doesn't guarantee it fits). Skip
+                # just this chunk rather than losing the whole file's
+                # otherwise-good chunks to one bad one.
+                logging.warning(f"Skipping a chunk from {source} (embedding failed: {e})")
+                continue
             new_chunks.append((norm_chunk, embedding))
 
     with db_connection.cursor() as cursor:

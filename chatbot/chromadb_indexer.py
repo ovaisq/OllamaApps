@@ -9,6 +9,7 @@ import logging
 import os
 
 import chromadb
+import ollama
 
 from chroma_config import CHROMA_CONFIG, INDEXER_CONFIG, OLLAMA_CONFIG
 from rag_common import (
@@ -43,7 +44,14 @@ def index_text(text: str, source: str, collection, client, extra_metadata: dict 
     for chunk in chunks:
         cid = chunk_hash(chunk)
         if cid not in existing_ids and cid not in unique_data:
-            embedding = embed_text(client, chunk, OLLAMA_CONFIG["embedding_model"], title=source)
+            try:
+                embedding = embed_text(client, chunk, OLLAMA_CONFIG["embedding_model"], title=source)
+            except ollama.ResponseError as e:
+                # e.g. "input length exceeds the context length" on a
+                # token-dense chunk (CSV rows tokenize heavier than prose).
+                # Skip just this chunk, not the whole file.
+                logger.warning("Skipping a chunk from %s (embedding failed: %s)", source, e)
+                continue
             unique_data[cid] = (normalize_text(chunk), embedding, metadata)
 
     if not unique_data:
