@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -48,6 +49,40 @@ def build_ollama_client(host: str, timeout: float) -> Any:
         host=host,
         timeout=httpx.Timeout(connect=10.0, read=timeout, write=timeout, pool=timeout),
     )
+
+
+class DriveSyncGate:
+    """Prevents overlapping Google Drive syncs.
+
+    One sync already parallelizes across a worker pool, so a second trigger
+    (double-click, impatient re-click, or a queued event replay) would spawn
+    a second fleet re-embedding the same corpus -- a sync storm that hammers
+    the embed endpoint and can double-insert chunks whose dedupe check ran
+    before the first pass committed. A short cooldown after a sync finishes
+    also swallows rapid re-triggers.
+
+    Deliberately not a plain threading.Lock held by callers: the UI needs an
+    immediate "busy" answer, not a pile of clicks waiting their turn.
+    """
+
+    def __init__(self, cooldown_seconds: float = 60.0):
+        self._lock = threading.Lock()
+        self._cooldown = cooldown_seconds
+        self._last_finished = 0.0
+
+    def try_begin(self) -> bool:
+        """True if this caller won the right to run a sync right now."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        if time.time() - self._last_finished < self._cooldown:
+            self._lock.release()
+            return False
+        return True
+
+    def finish(self) -> None:
+        """Release the gate after a sync completes (success or failure)."""
+        self._last_finished = time.time()
+        self._lock.release()
 
 
 def is_model_loaded(client: Any, model: str, min_ctx: Optional[int] = None) -> Optional[bool]:

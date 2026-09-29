@@ -124,6 +124,27 @@ def test_construction_prewarms_only_models_not_already_running(tmp_path):
     assert load_call["options"] is None
 
 
+def test_sync_drive_rejects_concurrent_triggers(chat):
+    """A second Drive sync trigger while one is running must be rejected
+    (-1) -- it would spawn a second concurrent embed worker pool re-embedding
+    the same corpus (a sync storm)."""
+    instance, _collection, _ollama_client = chat
+    assert instance._sync_gate.try_begin() is True  # simulate a running sync
+
+    assert instance.sync_drive() == -1
+
+    instance._sync_gate.finish()
+
+
+def test_sync_drive_runs_when_idle(chat):
+    instance, _collection, _ollama_client = chat
+    with patch("gdrive_indexer.get_access_token", return_value="token"), \
+         patch("gdrive_indexer.run_chromadb_backend", return_value=42) as run:
+        assert instance.sync_drive() == 42
+
+    run.assert_called_once_with("token")
+
+
 def test_respond_hides_internal_error_details_from_user(chat):
     instance, _collection, ollama_client = chat
     ollama_client.embeddings.side_effect = ConnectionError("db-password=hunter2 leaked")

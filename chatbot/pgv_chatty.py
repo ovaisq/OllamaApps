@@ -26,6 +26,7 @@ from rag_common import (
     build_chat_messages,
     build_ollama_client,
     detect_catalog_intent,
+    DriveSyncGate,
     embed_text,
     ensure_model_loaded,
     safe_error_message,
@@ -67,6 +68,9 @@ class PGVectorChat:
             keep_alive=OLLAMA_CONFIG["keep_alive"],
         )
         self._ensure_chat_history_schema()
+        # Serializes Drive syncs: one click already spawns a worker pool;
+        # a second concurrent click would re-embed the whole corpus again.
+        self._sync_gate = DriveSyncGate()
         with self._connection() as conn:
             ensure_markdown_chunks_schema(
                 conn, OLLAMA_CONFIG["embedding_dim"], OLLAMA_CONFIG["embedding_model"]
@@ -353,9 +357,20 @@ class PGVectorChat:
             return index_text(text, source, conn, extra_metadata=extra_metadata)
 
     def sync_drive(self) -> int:
+        """Sync Drive content into the index. Returns the number of new
+        chunks indexed, or -1 when a sync is already in progress or one
+        finished within the cooldown window (blocked to prevent a sync
+        storm from re-embedding the whole corpus).
+        """
         from gdrive_indexer import get_access_token, run_pgvector_backend
 
-        return run_pgvector_backend(get_access_token())
+        if not self._sync_gate.try_begin():
+            logger.warning("Ignoring Drive sync trigger: a sync is already running or just finished")
+            return -1
+        try:
+            return run_pgvector_backend(get_access_token())
+        finally:
+            self._sync_gate.finish()
 
 
 def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:

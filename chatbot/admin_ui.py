@@ -45,14 +45,17 @@ def upload_and_index(file_path: str, index_text_fn) -> str:
 
 
 def sync_drive_now(drive_sync_fn) -> str:
-    """drive_sync_fn() -> int chunks_added. Raises RuntimeError if Drive isn't
-    connected yet (no refresh token stored)."""
+    """drive_sync_fn() -> int chunks_added, or -1 when a sync is already
+    running / in cooldown. Raises RuntimeError if Drive isn't connected yet
+    (no refresh token stored)."""
     try:
         added = drive_sync_fn()
     except RuntimeError as e:
         return f"{e} Visit /login to connect Google Drive first."
     except Exception as e:
         return safe_error_message(e, logger)
+    if added < 0:
+        return "A Drive sync is already running (or just finished) -- not starting another."
     return f"Synced Google Drive: {added} new chunk(s) indexed."
 
 

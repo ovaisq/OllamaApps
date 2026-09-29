@@ -28,6 +28,7 @@ from rag_common import (
     build_chat_messages,
     build_ollama_client,
     detect_catalog_intent,
+    DriveSyncGate,
     embed_text,
     ensure_model_loaded,
     safe_error_message,
@@ -73,6 +74,9 @@ class ChromaChat:
             os.path.dirname(os.path.abspath(CHROMA_CONFIG["db_path"])), "chat_history.sqlite3"
         )
         self._ensure_chat_history_schema()
+        # Serializes Drive syncs: one click already spawns a worker pool;
+        # a second concurrent click would re-embed the whole corpus again.
+        self._sync_gate = DriveSyncGate()
 
     def _history_connection(self):
         return sqlite3.connect(self._history_db_path)
@@ -342,9 +346,20 @@ class ChromaChat:
         return index_text(text, source, self.collection, self.ollama_client, extra_metadata=extra_metadata)
 
     def sync_drive(self) -> int:
+        """Sync Drive content into the index. Returns the number of new
+        chunks indexed, or -1 when a sync is already in progress or one
+        finished within the cooldown window (blocked to prevent a sync
+        storm from re-embedding the whole corpus).
+        """
         from gdrive_indexer import get_access_token, run_chromadb_backend
 
-        return run_chromadb_backend(get_access_token())
+        if not self._sync_gate.try_begin():
+            logger.warning("Ignoring Drive sync trigger: a sync is already running or just finished")
+            return -1
+        try:
+            return run_chromadb_backend(get_access_token())
+        finally:
+            self._sync_gate.finish()
 
 
 def build_app(chat: "ChromaChat") -> fastapi.FastAPI:

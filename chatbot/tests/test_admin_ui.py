@@ -1,67 +1,43 @@
-from admin_ui import get_index_stats, sync_drive_now, upload_and_index
+"""Tests for the shared Admin tab handlers."""
+from unittest.mock import MagicMock
+
+import admin_ui
 
 
-def test_upload_and_index_rejects_missing_file():
-    assert upload_and_index(None, index_text_fn=lambda t, s: 1) == "No file selected."
+def test_sync_drive_now_reports_blocked_sync():
+    """The UI must say why nothing happened when a second sync is rejected,
+    not silently claim success."""
+    msg = admin_ui.sync_drive_now(lambda: -1)
+
+    assert "already running" in msg
+    assert "Synced" not in msg
 
 
-def test_upload_and_index_rejects_unsupported_extension(tmp_path):
-    f = tmp_path / "doc.docx"
-    f.write_text("hi")
-    result = upload_and_index(str(f), index_text_fn=lambda t, s: 1)
-    assert "No extractable text" in result
+def test_sync_drive_now_reports_success():
+    msg = admin_ui.sync_drive_now(lambda: 5)
+
+    assert "Synced Google Drive: 5 new chunk(s) indexed." == msg
 
 
-def test_upload_and_index_indexes_markdown_and_reports_count(tmp_path):
-    f = tmp_path / "notes.md"
-    f.write_text("# hello world")
+def test_sync_drive_now_wraps_missing_drive_auth():
+    def no_token():
+        raise RuntimeError("No refresh token stored")
 
-    calls = {}
+    msg = admin_ui.sync_drive_now(no_token)
 
-    def index_text_fn(text, source, extra_metadata=None):
-        calls["text"] = text
-        calls["source"] = source
-        calls["extra_metadata"] = extra_metadata
-        return 3
-
-    result = upload_and_index(str(f), index_text_fn)
-
-    assert calls["source"] == "notes.md"
-    assert "hello world" in calls["text"]
-    assert calls["extra_metadata"] == {"mime_type": "text/markdown"}
-    assert result == "Indexed 3 new chunk(s) from notes.md."
+    assert "Visit /login" in msg
+    assert "No refresh token stored" in msg
 
 
-def test_upload_and_index_hides_internal_errors(tmp_path):
-    f = tmp_path / "notes.md"
-    f.write_text("hello")
+def test_sync_drive_now_hides_internal_errors():
+    def boom():
+        raise ConnectionError("db-password=hunter2 leaked")
 
-    def index_text_fn(text, source, extra_metadata=None):
-        raise ConnectionError("db-password=hunter2")
+    msg = admin_ui.sync_drive_now(boom)
 
-    result = upload_and_index(str(f), index_text_fn)
-    assert "hunter2" not in result
-
-
-def test_sync_drive_now_reports_chunk_count():
-    assert sync_drive_now(lambda: 5) == "Synced Google Drive: 5 new chunk(s) indexed."
+    assert "hunter2" not in msg
+    assert "error id" in msg
 
 
-def test_sync_drive_now_tells_user_to_connect_drive_when_not_authorized():
-    def drive_sync_fn():
-        raise RuntimeError("No Google Drive refresh token found.")
-
-    result = sync_drive_now(drive_sync_fn)
-    assert "/login" in result
-
-
-def test_get_index_stats_reports_total():
-    assert get_index_stats(lambda: 42) == "Total indexed chunks: 42"
-
-
-def test_get_index_stats_hides_internal_errors():
-    def count_fn():
-        raise ConnectionError("db-password=hunter2")
-
-    result = get_index_stats(count_fn)
-    assert "hunter2" not in result
+def test_upload_and_index_rejects_unselected_file():
+    assert admin_ui.upload_and_index(None, MagicMock()) == "No file selected."

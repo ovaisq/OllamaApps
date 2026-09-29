@@ -104,3 +104,37 @@ def test_embed_text_keep_alive_defaults_to_server_default():
     rag_common.embed_text(client, "hello", EMBED)
 
     client.embeddings.assert_called_once_with(model=EMBED, prompt="hello", keep_alive=None)
+
+
+def test_sync_gate_allows_one_sync_at_a_time():
+    """A trigger arriving while a sync is running must be rejected outright,
+    not queued -- a pile of waiting clicks would still run back-to-back
+    full-corpus syncs when the lock frees up."""
+    gate = rag_common.DriveSyncGate(cooldown_seconds=0.0)
+
+    assert gate.try_begin() is True
+    assert gate.try_begin() is False
+    gate.finish()
+    assert gate.try_begin() is True
+
+
+def test_sync_gate_cooldown_blocks_immediate_retrigger():
+    """Rapid re-clicks right after a sync finishes are a sync storm too --
+    the cooldown swallows them."""
+    gate = rag_common.DriveSyncGate(cooldown_seconds=60.0)
+
+    gate.try_begin()
+    gate.finish()
+
+    assert gate.try_begin() is False
+
+
+def test_sync_gate_releases_after_failed_sync():
+    """sync_drive calls finish() in a finally; a crashed sync must not wedge
+    the gate forever."""
+    gate = rag_common.DriveSyncGate(cooldown_seconds=0.0)
+
+    gate.try_begin()
+    gate.finish()
+
+    assert gate.try_begin() is True
