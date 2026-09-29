@@ -28,6 +28,8 @@ _EXTENSION_MIME_TYPES = {
     ".md": "text/markdown",
     ".txt": "text/plain",
     ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
@@ -164,17 +166,18 @@ def build_admin_tab(index_text_fn, summary_fn, drive_sync_fn,
     """
     with gr.Tab("Library"):
         gr.Markdown(
-            "Add files or a folder — **.md, .txt, .pdf, .xlsx** get indexed; "
-            "anything else is skipped and named in the status below."
+            "Add files or a folder — **.md, .txt, .pdf, .doc, .docx, .xlsx** "
+            "get indexed; anything else is skipped and named in the status "
+            "below."
         )
         # Row 1: content in, Drive synced, all visible at a glance.
         with gr.Row(equal_height=False):
             with gr.Column():
                 gr.Markdown("### Add files")
                 upload = gr.File(
-                    label="Upload files (.md, .txt, .pdf, .xlsx)",
+                    label="Upload files (.md, .txt, .pdf, .doc, .docx, .xlsx)",
                     file_count="multiple",
-                    file_types=[".md", ".txt", ".pdf", ".xlsx"],
+                    file_types=[".md", ".txt", ".pdf", ".doc", ".docx", ".xlsx"],
                 )
                 upload_status = gr.Markdown()
             with gr.Column():

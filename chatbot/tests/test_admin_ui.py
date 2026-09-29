@@ -154,3 +154,64 @@ def test_teach_correction_requires_both_fields():
     ]
 
     index_text_fn.assert_not_called()
+
+
+def _docx_bytes(paragraphs):
+    """A real minimal .docx for upload-path tests (OOXML is a zip of XML)."""
+    import io
+    import zipfile
+
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    body = "".join(
+        f'<w:p><w:r><w:t xml:space="preserve">{p}</w:t></w:r></w:p>'
+        for p in paragraphs
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:document {ns}><w:body>{body}</w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def test_word_extensions_are_supported_with_drive_matching_mimes():
+    assert ".docx" in admin_ui._EXTENSION_MIME_TYPES
+    assert ".doc" in admin_ui._EXTENSION_MIME_TYPES
+    # The stored mime_type must match Drive-sourced Word files, so
+    # "list all docs" style catalog queries catch uploads and Drive files alike.
+    assert admin_ui._EXTENSION_MIME_TYPES[".docx"] == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert admin_ui._EXTENSION_MIME_TYPES[".doc"] == "application/msword"
+
+
+def test_upload_and_index_handles_word_document_uploads(tmp_path, monkeypatch):
+    """.docx (stdlib extractor) and legacy .doc (antiword/catdoc) are
+    indexed like any other supported type -- previously they were rejected
+    as unsupported on upload."""
+    docx = tmp_path / "memo.docx"
+    docx.write_bytes(_docx_bytes(["word doc content"]))
+    doc = tmp_path / "legacy.doc"
+    doc.write_bytes(b"legacy body")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    import shutil as _sh
+    fake = bin_dir / "antiword"
+    fake.write_text('#!/bin/sh\n' + _sh.which("cat") + ' "$1"\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    index_text_fn = MagicMock(return_value=2)
+    outputs = _consume(admin_ui.upload_and_index([str(docx), str(doc)], index_text_fn))
+
+    assert index_text_fn.call_count == 2
+    assert [c.args[1] for c in index_text_fn.call_args_list] == ["memo.docx", "legacy.doc"]
+    assert "Indexed 2 file(s), 4 new chunk(s)." in outputs[-1]
+    mimes = [c.kwargs["extra_metadata"]["mime_type"] for c in index_text_fn.call_args_list]
+    assert mimes == [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    ]

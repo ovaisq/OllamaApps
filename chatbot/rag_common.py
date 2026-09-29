@@ -434,6 +434,11 @@ CATEGORY_MIME_TYPES: Dict[str, set] = {
     },
     "doc": {
         "application/vnd.google-apps.document",
+        # Word files count as "docs": "list all docs" must catch them, and
+        # the catalog query filters on stored mime_type, so every Word flavor
+        # has to be listed (Google Docs, .docx, legacy .doc).
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
         "application/pdf",
         "text/plain",
         "text/markdown",
@@ -659,10 +664,86 @@ def extract_xlsx_text(xlsx_bytes: bytes) -> Optional[str]:
         return None
 
 
-def extract_text_from_upload(file_path: str) -> Optional[str]:
-    """Extract plain text from a locally-uploaded .md/.txt/.pdf/.xlsx file,
-    or None if the extension isn't supported.
+def extract_docx_text(docx_bytes: bytes) -> Optional[str]:
+    """Render a .docx (Office Open XML) document as plain text, stdlib-only.
+
+    A .docx is a zip; the document text is the <w:t> runs of the <w:p>
+    paragraphs in word/document.xml (table cells are <w:p> too, so their
+    text comes along in document order). Enough for embedding/retrieval,
+    not a faithful layout reproduction -- same bar as extract_xlsx_text.
     """
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    if not docx_bytes:
+        return None
+    _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    try:
+        with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
+            with zf.open("word/document.xml") as f:
+                tree = ET.parse(f)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError):
+        logger.exception("Failed to parse .docx")
+        return None
+
+    paragraphs = []
+    for para in tree.iter(f"{_W}p"):
+        runs = [node.text or "" for node in para.iter(f"{_W}t")]
+        if runs:
+            paragraphs.append("".join(runs))
+    text = "\n".join(paragraphs).strip()
+    return text or None
+
+
+def extract_doc_text(doc_bytes: bytes) -> Optional[str]:
+    """Extract text from a legacy .doc (OLE2/Word 97 binary) via antiword
+    or catdoc (antiword preferred; whichever is installed is used).
+
+    There is no practical pure-Python extractor for the Word 97 binary
+    format, so this shells out. When neither tool is installed it returns
+    None and the file is skipped-and-named by the upload summary -- the
+    same treatment any unextractable file gets. The Docker image installs
+    both (see Dockerfile).
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not doc_bytes:
+        return None
+    tool = shutil.which("antiword") or shutil.which("catdoc")
+    if not tool:
+        logger.warning(
+            "No .doc extractor available (antiword/catdoc not on PATH); "
+            "skipping file"
+        )
+        return None
+    tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+    try:
+        tmp.write(doc_bytes)
+        tmp.close()
+        proc = subprocess.run([tool, tmp.name], capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        logger.exception("Failed to extract .doc text via %s", tool)
+        return None
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        logger.warning(
+            "%s failed on .doc input (exit %d): %s",
+            tool, proc.returncode, proc.stderr[:200].decode("utf-8", "replace"),
+        )
+        return None
+    text = proc.stdout.decode("utf-8", errors="replace").strip()
+    return text or None
+
+
+def extract_text_from_upload(file_path: str) -> Optional[str]:
+    """Extract plain text from a locally-uploaded .md/.txt/.pdf/.doc/.docx/.xlsx
+    file, or None if the extension isn't supported."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in (".md", ".txt"):
         return read_markdown(file_path)
@@ -672,6 +753,12 @@ def extract_text_from_upload(file_path: str) -> Optional[str]:
     if ext == ".xlsx":
         with open(file_path, "rb") as f:
             return extract_xlsx_text(f.read())
+    if ext == ".docx":
+        with open(file_path, "rb") as f:
+            return extract_docx_text(f.read())
+    if ext == ".doc":
+        with open(file_path, "rb") as f:
+            return extract_doc_text(f.read())
     return None
 
 

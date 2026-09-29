@@ -207,3 +207,141 @@ def test_is_low_information_skips_numeric_dumps_but_keeps_prose():
     assert not rag_common.is_low_information(
         "Kona does not like peeing in new environments, so may initially hold it in."
     )
+
+
+# ---------------------------------------------------------------------------
+# Word document extraction (.docx via stdlib zip+XML; .doc via antiword/catdoc)
+# ---------------------------------------------------------------------------
+
+def _make_docx_bytes(paragraphs):
+    """Build a minimal but valid .docx (a zip with word/document.xml) in
+    memory -- .docx is OOXML, so this is a real fixture, not a mock."""
+    import io
+    import zipfile
+
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    body = "".join(
+        f"<w:p><w:r><w:t xml:space=\"preserve\">{p}</w:t></w:r></w:p>"
+        for p in paragraphs
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:document {ns}><w:body>{body}</w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        zf.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def _make_docx_with_runs():
+    """A .docx whose text is split across multiple <w:t> runs in one
+    paragraph -- extractors must join runs, not just take the first."""
+    import io
+    import zipfile
+
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:document {ns}><w:body>"
+        "<w:p><w:r><w:t>hello </w:t></w:r><w:r><w:t>bolded</w:t></w:r>"
+        "<w:r><w:t> world</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>second para</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def test_extract_docx_text_reads_paragraphs():
+    text = rag_common.extract_docx_text(_make_docx_bytes(["para one", "para two"]))
+    assert text == "para one\npara two"
+
+
+def test_extract_docx_text_joins_runs_within_a_paragraph():
+    text = rag_common.extract_docx_text(_make_docx_with_runs())
+    assert text == "hello bolded world\nsecond para"
+
+
+def test_extract_docx_text_rejects_garbage_and_empty():
+    assert rag_common.extract_docx_text(b"not a zip at all") is None
+    assert rag_common.extract_docx_text(b"") is None
+
+
+def test_extract_docx_text_empty_document_is_none():
+    assert rag_common.extract_docx_text(_make_docx_bytes([])) is None
+
+
+def _install_fake_tool(tmp_path, name, script):
+    """Write an executable `name` into a temp bin dir and return it. The
+    script must use absolute paths for any command it invokes, because the
+    tests run with a stripped PATH (no /usr/bin)."""
+    import shutil as _sh
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    cat = _sh.which("cat")  # resolved against the real PATH before we strip it
+    fake = bin_dir / name
+    fake.write_text("#!/bin/sh\n" + script.replace("{CAT}", cat))
+    fake.chmod(0o755)
+    return bin_dir
+
+
+def test_extract_doc_text_shells_out_to_installed_tool(tmp_path, monkeypatch):
+    """The .doc path hands the bytes to antiword/catdoc and returns their
+    stdout (verified with a fake tool that just cats the file, so the test
+    also proves the content reaches the tool intact)."""
+    bin_dir = _install_fake_tool(tmp_path, "antiword", '{CAT} "$1"')
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    assert rag_common.extract_doc_text(b"legacy doc body") == "legacy doc body"
+
+
+def test_extract_doc_text_prefers_antiword_over_catdoc(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "antiword").write_text('#!/bin/sh\nprintf "FROM-ANTIWORD\\n"\n')
+    (bin_dir / "catdoc").write_text('#!/bin/sh\nprintf "FROM-CATDOC\\n"\n')
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    assert rag_common.extract_doc_text(b"whatever") == "FROM-ANTIWORD"
+
+
+def test_extract_doc_text_returns_none_when_no_tool_installed(tmp_path, monkeypatch):
+    """Headless envs without antiword/catdoc: files are skipped (None),
+    never crash the upload/sync."""
+    empty_bin = tmp_path / "empty"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+
+    assert rag_common.extract_doc_text(b"whatever") is None
+
+
+def test_extract_doc_text_returns_none_when_tool_fails(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "catdoc"
+    fake.write_text('#!/bin/sh\nexit 1\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    assert rag_common.extract_doc_text(b"whatever") is None
+
+
+def test_extract_text_from_upload_dispatches_word_files(tmp_path, monkeypatch):
+    docx = tmp_path / "memo.docx"
+    docx.write_bytes(_make_docx_bytes(["uploaded docx text"]))
+    assert rag_common.extract_text_from_upload(str(docx)) == "uploaded docx text"
+
+    bin_dir = _install_fake_tool(tmp_path, "antiword", '{CAT} "$1"')
+    monkeypatch.setenv("PATH", str(bin_dir))
+    doc = tmp_path / "legacy.doc"
+    doc.write_bytes(b"legacy body")
+    assert rag_common.extract_text_from_upload(str(doc)) == "legacy body"

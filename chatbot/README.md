@@ -53,10 +53,13 @@ reachable except `GET /health` until you log in with an allowlisted account:
 3. On success you land back on the chat UI with a session cookie (7-day
    default, `SESSION_MAX_AGE_SECONDS`). `/logout` clears it.
 
-Once logged in, the **Admin** tab lets you:
-* Upload a `.md`/`.txt`/`.pdf` file to index immediately (no CLI/SSH needed).
-* Click "Sync Google Drive now" to pull new/changed Drive content on demand.
-* See total indexed chunk count.
+Once logged in, the **Library** tab lets you:
+* Upload a `.md`/`.txt`/`.pdf`/`.doc`/`.docx`/`.xlsx` file (or a folder) to
+  index immediately (no CLI/SSH needed).
+* Click "Sync Google Drive now" to pull new/changed Drive content on demand
+  (Google Docs/Sheets, Word files, .md/.txt/.xlsx, PDFs).
+* Teach Chatty a correction from a mis-answer you flagged with 👎.
+* See live index stats (document/chunk counts, top sources, last Drive sync).
 
 `gdrive_indexer.py` (the CLI/cron path) uses the same stored refresh token,
 so logging in once as an allowlisted account also unlocks scheduled syncs.

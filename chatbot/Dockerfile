@@ -8,6 +8,14 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Legacy .doc (Word 97 binary) has no practical pure-Python extractor, so the
+# app shells out to antiword (preferred) with catdoc as fallback. .docx needs
+# nothing (it's a zip of XML, parsed with the stdlib). Without these, .doc
+# files are skipped-and-named rather than fatal.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends antiword catdoc \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the current directory contents into the container at /app
 # (.dockerignore keeps secrets/*.py config files and local dev cruft out)
 COPY . /app

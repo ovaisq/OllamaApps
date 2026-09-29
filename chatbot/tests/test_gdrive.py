@@ -165,3 +165,47 @@ def test_token_store_returns_none_on_corrupt_file(tmp_path):
     path = tmp_path / "corrupt.json"
     path.write_text("not json")
     assert gdrive_token_store.load_refresh_token(str(path)) is None
+
+
+def test_list_files_yields_word_documents():
+    """.docx and legacy .doc on Drive must be picked up by sync, not
+    logged-and-skipped as unsupported mimetype."""
+    page = httpx.Response(
+        200,
+        json={
+            "files": [
+                {"id": "1", "name": "memo.docx",
+                 "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+                {"id": "2", "name": "legacy.doc", "mimeType": "application/msword"},
+                {"id": "3", "name": "image.png", "mimeType": "image/png"},
+            ],
+        },
+    )
+    mock_client = MagicMock()
+    mock_client.get.return_value = page
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("gdrive_client.httpx.Client", return_value=mock_client):
+        files = list(gdrive_client.list_files("token"))
+
+    assert [f["id"] for f in files] == ["1", "2"]
+
+
+def test_fetch_file_text_extracts_docx():
+    with patch("gdrive_client._download_raw", return_value=b"fake-bytes"), \
+         patch("gdrive_client.extract_docx_text", return_value="word body") as mock_extract:
+        text = gdrive_client.fetch_file_text(
+            "token", "fid",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    mock_extract.assert_called_once_with(b"fake-bytes")
+    assert text == "word body"
+
+
+def test_fetch_file_text_extracts_legacy_doc():
+    with patch("gdrive_client._download_raw", return_value=b"fake-bytes"), \
+         patch("gdrive_client.extract_doc_text", return_value="legacy body") as mock_extract:
+        text = gdrive_client.fetch_file_text("token", "fid", "application/msword")
+    mock_extract.assert_called_once_with(b"fake-bytes")
+    assert text == "legacy body"

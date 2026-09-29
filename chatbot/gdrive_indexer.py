@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Index Google Drive content (Google Docs, .md/.txt, PDFs) into the
-markdown chatbot's vector store.
+"""Index Google Drive content (Google Docs/Sheets, Word .doc/.docx,
+.md/.txt/.xlsx, PDFs) into the markdown chatbot's vector store.
 
 One-time setup: with the chatbot app running (pgv_chatty.py or
 chromadb_chatty.py, which mount the routes in auth_routes.py), log in as an

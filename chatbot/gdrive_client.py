@@ -1,24 +1,33 @@
 """Minimal Google Drive v3 REST client: list files and pull plain text out of
-Google Docs/Sheets, .md/.txt/.xlsx files, and PDFs. No google-api-python-client
-dependency (matches the httpx-against-raw-endpoints pattern used elsewhere in
-this repo).
+Google Docs/Sheets, Word documents (.doc/.docx), .md/.txt/.xlsx files, and
+PDFs. No google-api-python-client dependency (matches the httpx-against-raw-
+endpoints pattern used elsewhere in this repo).
 """
 import logging
 from typing import Any, Dict, Iterator, Optional
 
 import httpx
 
-from rag_common import extract_pdf_text, extract_xlsx_text
+from rag_common import (
+    extract_doc_text,
+    extract_docx_text,
+    extract_pdf_text,
+    extract_xlsx_text,
+)
 
 logger = logging.getLogger(__name__)
 
 _GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 _GOOGLE_SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_DOC_MIME = "application/msword"
 _SUPPORTED_MIMES = {
     _GOOGLE_DOC_MIME,
     _GOOGLE_SHEET_MIME,
     _XLSX_MIME,
+    _DOCX_MIME,
+    _DOC_MIME,
     "text/plain",
     "text/markdown",
     "application/pdf",
@@ -115,6 +124,13 @@ def fetch_file_text(access_token: str, file_id: str, mime_type: str) -> Optional
         return extract_pdf_text(_download_raw(access_token, file_id))
     if mime_type == _XLSX_MIME:
         return extract_xlsx_text(_download_raw(access_token, file_id))
+    if mime_type == _DOCX_MIME:
+        return extract_docx_text(_download_raw(access_token, file_id))
+    if mime_type == _DOC_MIME:
+        # Legacy binary Word: needs antiword/catdoc on the server; without
+        # them this returns None and the file is logged as skipped, same as
+        # any other unextractable input.
+        return extract_doc_text(_download_raw(access_token, file_id))
     return None
 
 
