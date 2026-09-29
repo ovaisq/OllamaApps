@@ -71,6 +71,53 @@ def test_fetch_file_text_returns_none_for_unsupported_mime_type():
     assert gdrive_client.fetch_file_text("token", "fid", "video/mp4") is None
 
 
+def test_fetch_file_text_exports_google_sheets_as_csv():
+    """Regression test for the "Engineering Reports" incident: Google Sheets
+    were entirely unsupported, so an existing folder of spreadsheets was
+    silently skipped on every Drive sync.
+    """
+    with patch("httpx.get", return_value=httpx.Response(200, text="Quarter,Status\nQ1,On track\n")):
+        text = gdrive_client.fetch_file_text(
+            "token", "fid", "application/vnd.google-apps.spreadsheet"
+        )
+    assert text == "Quarter,Status\nQ1,On track\n"
+
+
+def test_fetch_file_text_extracts_xlsx():
+    with patch("gdrive_client._download_raw", return_value=b"fake-bytes"), \
+         patch("gdrive_client.extract_xlsx_text", return_value="Sheet: Reports\nQ1,On track") as mock_extract:
+        text = gdrive_client.fetch_file_text(
+            "token", "fid",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    mock_extract.assert_called_once_with(b"fake-bytes")
+    assert text == "Sheet: Reports\nQ1,On track"
+
+
+def test_list_files_logs_and_skips_unsupported_mime_types():
+    page = httpx.Response(
+        200,
+        json={
+            "files": [
+                {"id": "1", "name": "image.png", "mimeType": "image/png"},
+                {"id": "2", "name": "doc.gdoc", "mimeType": "application/vnd.google-apps.document"},
+            ],
+        },
+    )
+    mock_client = MagicMock()
+    mock_client.get.return_value = page
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("gdrive_client.httpx.Client", return_value=mock_client), \
+         patch("gdrive_client.logger") as mock_logger:
+        files = list(gdrive_client.list_files("token"))
+
+    assert [f["id"] for f in files] == ["2"]
+    mock_logger.info.assert_called_once()
+    assert "image.png" in mock_logger.info.call_args.args
+
+
 def test_token_store_round_trips_refresh_token(tmp_path):
     path = str(tmp_path / "token.json")
     gdrive_token_store.save_refresh_token(path, "my-refresh-token")

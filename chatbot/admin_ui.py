@@ -22,7 +22,7 @@ def upload_and_index(file_path: str, index_text_fn) -> str:
         return "No file selected."
     text = extract_text_from_upload(file_path)
     if not text or not text.strip():
-        return "No extractable text found in that file (supported: .md, .txt, .pdf)."
+        return "No extractable text found in that file (supported: .md, .txt, .pdf, .xlsx)."
     try:
         added = index_text_fn(text, os.path.basename(file_path))
     except Exception as e:
@@ -54,7 +54,10 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
     """Adds an 'Admin' tab to the enclosing gr.Blocks context."""
     with gr.Tab("Admin"):
         gr.Markdown("## Add content")
-        upload = gr.File(label="Upload a .md / .txt / .pdf file", file_types=[".md", ".txt", ".pdf"])
+        upload = gr.File(
+            label="Upload a .md / .txt / .pdf / .xlsx file",
+            file_types=[".md", ".txt", ".pdf", ".xlsx"],
+        )
         upload_status = gr.Markdown()
         upload.upload(
             lambda f: upload_and_index(f.name if f else None, index_text_fn), upload, upload_status

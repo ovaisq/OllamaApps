@@ -91,9 +91,41 @@ def extract_pdf_text(pdf_bytes: bytes) -> Optional[str]:
         return None
 
 
+def extract_xlsx_text(xlsx_bytes: bytes) -> Optional[str]:
+    """Render every sheet's cell values as CSV-ish text, or None on failure.
+
+    Only cell values are captured (no formulas/formatting) -- enough for
+    embedding/retrieval, not a faithful spreadsheet reproduction. A Google
+    Sheet with multiple tabs should go through Sheets export instead (Drive's
+    /export only returns the first sheet as CSV); this path is for real
+    .xlsx files, which openpyxl can read in full.
+    """
+    if not xlsx_bytes:
+        return None
+    from openpyxl import load_workbook
+
+    try:
+        workbook = load_workbook(io.BytesIO(xlsx_bytes), data_only=True, read_only=True)
+        parts = []
+        for sheet in workbook.worksheets:
+            parts.append(f"Sheet: {sheet.title}")
+            for row in sheet.iter_rows(values_only=True):
+                # Trim trailing empty cells (openpyxl pads rows to the
+                # sheet's widest row) so embeddings aren't drowned in commas.
+                trimmed = list(row)
+                while trimmed and trimmed[-1] is None:
+                    trimmed.pop()
+                if trimmed:
+                    parts.append(",".join("" if cell is None else str(cell) for cell in trimmed))
+        return "\n".join(parts)
+    except Exception:
+        logger.exception("Failed to extract text from .xlsx")
+        return None
+
+
 def extract_text_from_upload(file_path: str) -> Optional[str]:
-    """Extract plain text from a locally-uploaded .md/.txt/.pdf file, or
-    None if the extension isn't supported.
+    """Extract plain text from a locally-uploaded .md/.txt/.pdf/.xlsx file,
+    or None if the extension isn't supported.
     """
     ext = os.path.splitext(file_path)[1].lower()
     if ext in (".md", ".txt"):
@@ -101,6 +133,9 @@ def extract_text_from_upload(file_path: str) -> Optional[str]:
     if ext == ".pdf":
         with open(file_path, "rb") as f:
             return extract_pdf_text(f.read())
+    if ext == ".xlsx":
+        with open(file_path, "rb") as f:
+            return extract_xlsx_text(f.read())
     return None
 
 

@@ -7,11 +7,30 @@ from rag_common import (
     chunk_hash,
     create_chunks,
     extract_text_from_upload,
+    extract_xlsx_text,
     normalize_text,
     safe_error_message,
     validate_message,
     with_retries,
 )
+
+
+def _build_test_xlsx_bytes() -> bytes:
+    import io
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "Reports"
+    ws1.append(["Quarter", "Status"])
+    ws1.append(["Q1", "On track"])
+    ws2 = wb.create_sheet("Notes")
+    ws2.append(["Engineering summary here"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def test_build_ollama_client_uses_short_connect_and_long_read_timeout():
@@ -105,3 +124,30 @@ def test_extract_text_from_upload_returns_none_for_unsupported_extension(tmp_pat
     f = tmp_path / "notes.docx"
     f.write_text("hi")
     assert extract_text_from_upload(str(f)) is None
+
+
+def test_extract_xlsx_text_reads_all_sheets():
+    """Regression test for the "Engineering Reports" incident: a Google
+    Sheet/.xlsx full of real content was silently skipped everywhere because
+    nothing extracted text from spreadsheets at all.
+    """
+    text = extract_xlsx_text(_build_test_xlsx_bytes())
+    assert "Sheet: Reports" in text
+    assert "Q1,On track" in text
+    assert "Sheet: Notes" in text
+    assert "Engineering summary here" in text
+
+
+def test_extract_xlsx_text_returns_none_for_empty_bytes():
+    assert extract_xlsx_text(b"") is None
+
+
+def test_extract_xlsx_text_returns_none_for_garbage_bytes():
+    assert extract_xlsx_text(b"not a real xlsx file") is None
+
+
+def test_extract_text_from_upload_reads_xlsx(tmp_path):
+    f = tmp_path / "report.xlsx"
+    f.write_bytes(_build_test_xlsx_bytes())
+    text = extract_text_from_upload(str(f))
+    assert "Engineering summary here" in text
