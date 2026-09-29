@@ -46,7 +46,7 @@ def read_markdown(file_path: str) -> str:
 
 def create_chunks(text: str, chunk_size: int = 800, chunk_overlap: int = 100) -> List[str]:
     """Split text into chunks using RecursiveCharacterTextSplitter."""
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,

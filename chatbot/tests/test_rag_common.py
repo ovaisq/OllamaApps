@@ -4,12 +4,24 @@ import pytest
 
 from rag_common import (
     chunk_hash,
+    create_chunks,
     extract_text_from_upload,
     normalize_text,
     safe_error_message,
     validate_message,
     with_retries,
 )
+
+
+def test_create_chunks_actually_splits_text():
+    """Regression test: this hits the real langchain_text_splitters import
+    (no mocking) so a broken/renamed import surfaces here instead of only in
+    production, where every other test patches create_chunks out entirely.
+    """
+    text = "hello world. " * 200
+    chunks = create_chunks(text, chunk_size=100, chunk_overlap=10)
+    assert len(chunks) > 1
+    assert all(isinstance(c, str) and c for c in chunks)
 
 
 def test_normalize_text_collapses_whitespace():
