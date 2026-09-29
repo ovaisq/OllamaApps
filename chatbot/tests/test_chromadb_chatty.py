@@ -145,6 +145,25 @@ def test_sync_drive_runs_when_idle(chat):
     run.assert_called_once_with("token")
 
 
+def test_scroll_follows_output_only_while_user_is_at_bottom(chat):
+    """Gradio's built-in autoscroll yanks the view to the bottom on every
+    streamed token inside its threshold gap -- users read it as "a pending
+    answer blocks the scroll". The app must disable it and wire
+    SMART_SCROLL_JS instead, which follows only while the user is already
+    at the bottom."""
+    instance, _collection, _ollama_client = chat
+    app = chromadb_chatty.build_app(instance)
+
+    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
+    config = mount.app.blocks.config
+    chatbots = [c for c in config["components"] if c.get("type") == "chatbot"]
+    assert chatbots, "no chatbot component in the built app"
+    assert all(c["props"].get("autoscroll") is False for c in chatbots)
+    assert any(
+        "bubble-wrap" in (d.get("js") or "") for d in config["dependencies"]
+    ), "SMART_SCROLL_JS is not wired to the load event"
+
+
 def test_respond_hides_internal_error_details_from_user(chat):
     instance, _collection, ollama_client = chat
     ollama_client.embeddings.side_effect = ConnectionError("db-password=hunter2 leaked")

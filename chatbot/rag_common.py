@@ -41,6 +41,58 @@ TYPING_INDICATOR_CSS = """
 }
 """
 
+# Replaces Gradio's built-in chatbot autoscroll (set autoscroll=False on
+# the component to disable it). Gradio 6 runs two overlapping mechanisms
+# with different "user scrolled up" thresholds (message-level ~10px,
+# page-level ~100px), and a streamed token arriving inside the gap yanks
+# the view back down -- which reads to users as "a pending answer blocks
+# the scroll". One deterministic rule instead: follow the newest content
+# only while the user is already at the bottom of the chat; the moment
+# they scroll up, stop fighting them; pressing Enter (a new message)
+# resumes following. Targets the chatbot's scroll container (the
+# div.bubble-wrap element, verified in gradio 6.28's rendered DOM) and
+# is injected via the Blocks .load(js=...) event, so it runs once per
+# page load alongside the history-load handler.
+SMART_SCROLL_JS = """(function () {
+    var following = true;
+    var NEAR_BOTTOM_PX = 80;
+    function nearBottom(el) {
+        return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    }
+    function install(el) {
+        el.addEventListener('scroll', function () {
+            following = nearBottom(el);
+        }, { passive: true });
+        var box = document.querySelector('textarea[data-testid="textbox"]');
+        if (box) {
+            box.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter') { following = true; }
+            });
+        }
+        var observer = new MutationObserver(function () {
+            if (following) { el.scrollTop = el.scrollHeight; }
+        });
+        observer.observe(el, { childList: true, subtree: true, characterData: true });
+        if (following) { el.scrollTop = el.scrollHeight; }
+    }
+    function start() {
+        var el = document.querySelector('div.bubble-wrap');
+        if (el) { install(el); return; }
+        // The chatbot hydrates after the initial render; poll briefly.
+        var tries = 0;
+        var timer = setInterval(function () {
+            var found = document.querySelector('div.bubble-wrap');
+            if (found) { clearInterval(timer); install(found); }
+            else if (++tries > 40) { clearInterval(timer); }
+        }, 250);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start);
+    } else {
+        start();
+    }
+})();"""
+
 
 def build_ollama_client(host: str, timeout: float) -> Any:
     """Build an ollama.Client with a short connect timeout (fail fast if the

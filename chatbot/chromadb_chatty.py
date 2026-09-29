@@ -32,6 +32,7 @@ from rag_common import (
     embed_text,
     ensure_model_loaded,
     safe_error_message,
+    SMART_SCROLL_JS,
     validate_message,
     with_retries,
 )
@@ -373,7 +374,12 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):
-            chatbot = gr.Chatbot()
+            # autoscroll=False: Gradio's own autoscroll yanks the view to
+            # the bottom on every streamed token inside its threshold gap
+            # ("a pending answer blocks the scroll"). SMART_SCROLL_JS
+            # (wired to the load event below) implements one rule: follow
+            # the output only while the user is already at the bottom.
+            chatbot = gr.Chatbot(autoscroll=False)
             msg = gr.Textbox(label="Ask about the README")
             stop_btn = gr.Button("Stop Chat")
             state = gr.State(value={})
@@ -384,7 +390,7 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
             clear_btn = gr.Button("Clear History")
             clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state])
 
-            blocks.load(chat.load_history_ui, None, chatbot)
+            blocks.load(chat.load_history_ui, None, chatbot, js=SMART_SCROLL_JS)
 
         build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
 
