@@ -25,23 +25,53 @@ _EXTENSION_MIME_TYPES = {
 }
 
 
-def upload_and_index(file_path: str, index_text_fn) -> str:
-    """index_text_fn(text: str, source: str, extra_metadata: dict = None) -> int chunks_added."""
-    if not file_path:
+def upload_and_index(file_paths, index_text_fn) -> str:
+    """Upload one file, several files, or a whole folder and index them.
+
+    file_paths may be None, a single gradio FileData (or a path string),
+    or a list of them (gradio's file_count="multiple"/"directory" modes).
+    index_text_fn(text, source, extra_metadata=None) -> int chunks_added.
+    Files without extractable text and unsupported types are skipped and
+    named in the summary.
+    """
+    if file_paths is None:
         return "No file selected."
-    text = extract_text_from_upload(file_path)
-    if not text or not text.strip():
-        return "No extractable text found in that file (supported: .md, .txt, .pdf, .xlsx)."
-    ext = os.path.splitext(file_path)[1].lower()
-    mime_type = _EXTENSION_MIME_TYPES.get(ext)
-    try:
-        added = index_text_fn(
-            text, os.path.basename(file_path),
-            extra_metadata={"mime_type": mime_type} if mime_type else None,
-        )
-    except Exception as e:
-        return safe_error_message(e, logger)
-    return f"Indexed {added} new chunk(s) from {os.path.basename(file_path)}."
+    if not isinstance(file_paths, (list, tuple)):
+        file_paths = [file_paths]
+
+    indexed, skipped, total_chunks = 0, [], 0
+    for f in file_paths:
+        path = getattr(f, "path", None) or getattr(f, "name", None) or f
+        name = os.path.basename(getattr(f, "orig_name", None) or str(path))
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in _EXTENSION_MIME_TYPES:
+            skipped.append(f"{name} (unsupported: {ext or 'no extension'})")
+            continue
+        text = extract_text_from_upload(path)
+        if not text or not text.strip():
+            skipped.append(f"{name} (no extractable text)")
+            continue
+        mime_type = _EXTENSION_MIME_TYPES.get(ext)
+        try:
+            added = index_text_fn(
+                text, name,
+                extra_metadata={"mime_type": mime_type} if mime_type else None,
+            )
+        except Exception as e:
+            logger.warning("Indexing uploaded file %s failed: %s", name, e)
+            skipped.append(f"{name} (indexing failed)")
+            continue
+        indexed += 1
+        total_chunks += added
+
+    if not indexed and not skipped:
+        return "No files selected."
+    summary = f"Indexed {indexed} file(s), {total_chunks} new chunk(s)."
+    if skipped:
+        shown = skipped[:5]
+        more = len(skipped) - len(shown)
+        summary += " Skipped: " + ", ".join(shown) + (f" (+{more} more)" if more > 0 else "")
+    return summary
 
 
 def sync_drive_now(drive_sync_fn) -> str:
@@ -98,17 +128,30 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
     """Adds an 'Admin' tab to the enclosing gr.Blocks context."""
     with gr.Tab("Admin"):
         gr.Markdown("## Add content")
+        # Two upload paths: a multi-file picker (restricted to supported
+        # types) and a folder picker (browser sends every file inside;
+        # unsupported types are skipped server-side and named in the
+        # summary).
         upload = gr.File(
-            label="Upload a .md / .txt / .pdf / .xlsx file",
+            label="Upload files (.md, .txt, .pdf, .xlsx)",
+            file_count="multiple",
             file_types=[".md", ".txt", ".pdf", ".xlsx"],
         )
         upload_status = gr.Markdown()
-        # One timer ('full' scoped to the status line only -- the default
-        # would render it on every output component).
         upload.upload(
-            lambda f: upload_and_index(f.name if f else None, index_text_fn),
+            lambda f: upload_and_index(f, index_text_fn),
             upload, upload_status,
             show_progress="full", show_progress_on=[upload_status],
+        )
+        folder_upload = gr.File(
+            label="Upload a folder (its .md/.txt/.pdf/.xlsx files are indexed)",
+            file_count="directory",
+        )
+        folder_upload_status = gr.Markdown()
+        folder_upload.upload(
+            lambda f: upload_and_index(f, index_text_fn),
+            folder_upload, folder_upload_status,
+            show_progress="full", show_progress_on=[folder_upload_status],
         )
 
         gr.Markdown("## Google Drive")

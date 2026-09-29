@@ -43,6 +43,74 @@ def test_upload_and_index_rejects_unselected_file():
     assert admin_ui.upload_and_index(None, MagicMock()) == "No file selected."
 
 
+class _UploadedFile:
+    """Stand-in for gradio's FileData as passed to upload event handlers."""
+
+    def __init__(self, path, orig_name):
+        self.path = path
+        self.orig_name = orig_name
+
+
+def test_upload_and_index_still_accepts_a_single_file(tmp_path):
+    f = tmp_path / "single.md"
+    f.write_text("single file content")
+    index_text_fn = MagicMock(return_value=1)
+
+    msg = admin_ui.upload_and_index(str(f), index_text_fn)
+
+    assert "Indexed 1 file(s), 1 new chunk(s)." in msg
+    assert index_text_fn.call_args.args[1] == "single.md"
+
+
+def test_upload_and_index_handles_multiple_files(tmp_path):
+    first = tmp_path / "notes.md"
+    first.write_text("Some markdown notes about Kona the dog.")
+    second = tmp_path / "numbers.txt"
+    second.write_text("plain text file with some content")
+    index_text_fn = MagicMock(return_value=2)
+
+    msg = admin_ui.upload_and_index([str(first), str(second)], index_text_fn)
+
+    assert index_text_fn.call_count == 2
+    assert "Indexed 2 file(s), 4 new chunk(s)." in msg
+    assert [c.args[1] for c in index_text_fn.call_args_list] == ["notes.md", "numbers.txt"]
+
+
+def test_upload_and_index_handles_folder_uploads(tmp_path):
+    """Folder uploads arrive as a list including files of every type;
+    unsupported ones are skipped by name, supported ones indexed."""
+    doc = tmp_path / "folder" / "notes.md"
+    doc.parent.mkdir()
+    doc.write_text("markdown inside an uploaded folder")
+    image = tmp_path / "folder" / "logo.png"
+    image.write_bytes(b"\x89PNG")
+    index_text_fn = MagicMock(return_value=1)
+
+    msg = admin_ui.upload_and_index(
+        [_UploadedFile(str(doc), "folder/notes.md"),
+         _UploadedFile(str(image), "folder/logo.png")],
+        index_text_fn,
+    )
+
+    assert index_text_fn.call_count == 1
+    assert index_text_fn.call_args.args[1] == "notes.md"
+    assert "Indexed 1 file(s), 1 new chunk(s)." in msg
+    assert "logo.png (unsupported: .png)" in msg
+
+
+def test_upload_and_index_reports_indexing_failures_per_file(tmp_path):
+    good = tmp_path / "good.md"
+    good.write_text("good content")
+    bad = tmp_path / "bad.md"
+    bad.write_text("bad content")
+    index_text_fn = MagicMock(side_effect=[3, RuntimeError("boom")])
+
+    msg = admin_ui.upload_and_index([str(good), str(bad)], index_text_fn)
+
+    assert "Indexed 1 file(s), 3 new chunk(s)." in msg
+    assert "bad.md (indexing failed)" in msg
+
+
 def test_teach_correction_indexes_the_correction_as_authoritative_knowledge():
     """Teaching a correction is how the app learns from user-reported
     mistakes: the correction must land in the vector index (so future
