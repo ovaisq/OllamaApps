@@ -27,6 +27,18 @@ Both `*_config.py` files are gitignored — never commit real credentials.
 export OLLAMA_HOST="http://localhost:11434"
 ```
 
+## Docker Compose
+
+```bash
+cp .env.example .env   # fill in real DB/Ollama/Google Drive values
+docker compose up -d --build
+```
+
+This builds the chatbot image (pgv_chatty.py by default) plus a pgvector-enabled
+Postgres. `.env` is required — `docker compose` looks for it in the same
+directory as `docker-compose.yml` and refuses to start without the vars it
+references (`DB_PASSWORD` in particular).
+
 ## Production notes
 
 * Retrieval uses real pgvector/Chroma nearest-neighbor search over query embeddings (not chunk length).
