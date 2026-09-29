@@ -39,21 +39,36 @@ TYPING_INDICATOR_CSS = """
     0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
     40% { transform: scale(1); opacity: 1; }
 }
+.typing-indicator .typing-timer {
+    width: auto; height: auto; border-radius: 0;
+    background: none; animation: none;
+    margin-left: 6px; align-self: center;
+    font-size: 12px; opacity: 0.6;
+}
 """
 
-# Replaces Gradio's built-in chatbot autoscroll (set autoscroll=False on
-# the component to disable it). Gradio 6 runs two overlapping mechanisms
-# with different "user scrolled up" thresholds (message-level ~10px,
-# page-level ~100px), and a streamed token arriving inside the gap yanks
-# the view back down -- which reads to users as "a pending answer blocks
-# the scroll". One deterministic rule instead: follow the newest content
-# only while the user is already at the bottom of the chat; the moment
-# they scroll up, stop fighting them; pressing Enter (a new message)
-# resumes following. Targets the chatbot's scroll container (the
-# div.bubble-wrap element, verified in gradio 6.28's rendered DOM) and
-# is injected via the Blocks .load(js=...) event, so it runs once per
-# page load alongside the history-load handler.
-SMART_SCROLL_JS = """(function () {
+# Client-side chat UI behavior, wired via the Blocks .load(js=...) event so
+# it runs once per page load. Two jobs:
+#
+# 1. Smart scrolling (replaces Gradio's built-in autoscroll, which runs two
+#    overlapping mechanisms with different "user scrolled up" thresholds --
+#    a token arriving inside the gap yanks the view back down, which reads
+#    as "a pending answer blocks the scroll"). One deterministic rule:
+#    follow the newest content only while the user is already near the
+#    bottom; the moment they scroll up, stop fighting them; pressing Enter
+#    (sending a message) resumes following.
+#
+# 2. A visible elapsed timer next to the typing dots while the answer is
+#    pending. Gradio's status tracker cannot serve this role: it hides
+#    itself as soon as the event starts streaming (and the typing-indicator
+#    yield makes the chat stream immediately), so no built-in progress
+#    setting produces a visible chat timer. This one renders in exactly
+#    one place -- inside the pending answer bubble -- counts up until the
+#    first real text replaces the dots, and removes itself then.
+#
+# Targets the chatbot's scroll container (div.bubble-wrap, verified in
+# gradio 6.28's rendered DOM).
+CHAT_UI_JS = """(function () {
     var following = true;
     var NEAR_BOTTOM_PX = 80;
     function nearBottom(el) {
@@ -70,10 +85,39 @@ SMART_SCROLL_JS = """(function () {
             });
         }
         var observer = new MutationObserver(function () {
+            manageTimer(el);
             if (following) { el.scrollTop = el.scrollHeight; }
         });
         observer.observe(el, { childList: true, subtree: true, characterData: true });
         if (following) { el.scrollTop = el.scrollHeight; }
+    }
+    var timerInterval = null;
+    var timerSeconds = 0;
+    var timerSpan = null;
+    function stopTimer() {
+        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        timerSpan = null;
+        timerSeconds = 0;
+    }
+    function manageTimer(el) {
+        var dots = el.querySelector('.typing-indicator');
+        if (!dots) {
+            if (timerInterval) { stopTimer(); }
+            return;
+        }
+        if (!timerInterval) {
+            timerSeconds = 0;
+            timerSpan = document.createElement('span');
+            timerSpan.className = 'typing-timer';
+            timerSpan.textContent = '0s';
+            dots.appendChild(timerSpan);
+            timerInterval = setInterval(function () {
+                timerSeconds += 1;
+                var current = el.querySelector('.typing-indicator .typing-timer');
+                if (!current) { stopTimer(); return; }
+                current.textContent = timerSeconds + 's';
+            }, 1000);
+        }
     }
     function start() {
         var el = document.querySelector('div.bubble-wrap');

@@ -145,3 +145,14 @@ def test_system_prompt_treats_user_corrections_as_authoritative():
     is told to treat [user-corrections] chunks as overriding documents."""
     assert "user-corrections" in rag_common.CHAT_SYSTEM_PROMPT
     assert "override" in rag_common.CHAT_SYSTEM_PROMPT
+
+
+def test_chat_ui_js_renders_a_visible_elapsed_timer():
+    """Gradio's status tracker cannot be the chat timer -- it hides itself
+    as soon as an event starts streaming, and the typing-indicator yield
+    makes the chat stream immediately (verified against the 6.28
+    statustracker bundle; show_progress settings can't produce a visible
+    chat timer). The UI JS must render its own: an elapsed counter next to
+    the typing dots while the answer is pending."""
+    assert "typing-timer" in rag_common.CHAT_UI_JS
+    assert "typing-timer" in rag_common.TYPING_INDICATOR_CSS
