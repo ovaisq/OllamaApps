@@ -190,11 +190,18 @@ Answer:
         return run_chromadb_backend(get_access_token())
 
 
-def main():
-    chat = ChromaChat()
-
-    with gr.Blocks(title="Markdown Chatbot", css="footer {display: none !important;}") as blocks:
-        gr.Markdown("# ChromaDB: Markdown Chatbot")
+def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
+    """Build the Gradio UI + FastAPI app around an existing ChromaChat
+    instance. Split out from main() so the UI construction (which uses a real
+    Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
+    """
+    with gr.Blocks(
+        title="Markdown Chatbot",
+        css="footer {display: none !important;} #signout-link {text-align: right;}",
+    ) as blocks:
+        with gr.Row():
+            gr.Markdown("# ChromaDB: Markdown Chatbot")
+            gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):
             chatbot = gr.Chatbot()
@@ -222,6 +229,12 @@ def main():
     register_auth_routes(app)
 
     gr.mount_gradio_app(app, blocks.queue(), path="/")
+    return app
+
+
+def main():
+    chat = ChromaChat()
+    app = build_app(chat)
 
     import uvicorn
 

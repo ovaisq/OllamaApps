@@ -197,18 +197,19 @@ Answer:
         return run_pgvector_backend(get_access_token())
 
 
-def main():
-    """Main function for chat interface."""
-    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
-
-    chat = PGVectorChat()
-
+def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
+    """Build the Gradio UI + FastAPI app around an existing PGVectorChat
+    instance. Split out from main() so the UI construction (which uses a real
+    Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
+    """
     with gr.Blocks(
         title="Markdown Document Chatbot",
-        css="footer {display: none !important;}",
+        css="footer {display: none !important;} #signout-link {text-align: right;}",
         theme="JohnSmith9982/small_and_pretty",
     ) as chatty:
-        gr.Markdown("# Markdown Document Chatbot")
+        with gr.Row():
+            gr.Markdown("# Markdown Document Chatbot")
+            gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):
             chatbot = gr.Chatbot(label="Chat History")
@@ -239,6 +240,15 @@ def main():
     register_auth_routes(app)
 
     gr.mount_gradio_app(app, chatty.queue(), path="/")
+    return app
+
+
+def main():
+    """Main function for chat interface."""
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
+
+    chat = PGVectorChat()
+    app = build_app(chat)
 
     import uvicorn
 

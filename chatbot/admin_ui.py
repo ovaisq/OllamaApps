@@ -69,5 +69,3 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
         stats = gr.Markdown()
         refresh_btn = gr.Button("Refresh stats")
         refresh_btn.click(lambda: get_index_stats(count_fn), None, stats)
-
-        gr.Markdown("[Log out](/logout)")
