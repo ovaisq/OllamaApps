@@ -333,6 +333,12 @@ class PGVectorChat:
             if stop_event.is_set():
                 break
             content = chunk.get("message", {}).get("content", "")
+            if not content:
+                # Ollama's first chunk is role-only (empty content).
+                # Yielding it replaced the typing indicator with an empty
+                # bubble that sat there for the whole prefill window --
+                # keep the dots up until real text arrives instead.
+                continue
             full_response += content
             yield full_response
 
@@ -372,6 +378,13 @@ class PGVectorChat:
                 )
         except Exception as e:
             final_response = safe_error_message(e, logger)
+            yield (new_history + [{"role": "assistant", "content": final_response}], "", state)
+
+        if final_response is None:
+            # The stream produced no text (stopped before the first token,
+            # or the model returned nothing at all): don't leave the typing
+            # dots frozen on screen as if it were still thinking.
+            final_response = "(stopped)" if stop_event.is_set() else "(no response content)"
             yield (new_history + [{"role": "assistant", "content": final_response}], "", state)
 
         if user_email and final_response:
@@ -439,7 +452,7 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
     """
     with gr.Blocks(title="Chatty") as chatty:
         with gr.Row():
-            gr.Markdown("# Chatty — Document & Drive Assistant")
+            gr.Markdown("# Chatty: Document & Drive Assistant")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):

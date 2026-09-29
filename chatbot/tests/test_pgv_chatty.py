@@ -226,6 +226,38 @@ def test_like_event_is_wired_to_feedback_recording(chat):
     ), "the chatbot's like event is not wired to feedback recording"
 
 
+def test_stream_keeps_typing_indicator_until_real_text(chat):
+    """Ollama's first chunk is role-only (empty content). Yielding it
+    replaced the typing dots with an empty bubble that sat on screen for
+    the whole prefill window -- the confusing dots, then empty, then
+    answer sequence users reported."""
+    instance, cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    instance.ollama_client.chat.return_value = iter([
+        {"message": {"content": ""}},
+        {"message": {"content": "Hello"}},
+        {"message": {"content": " world"}},
+    ])
+
+    parts = list(instance.get_answer_stream("hi", [], MagicMock(is_set=lambda: False)))
+
+    assert parts == ["Hello", "Hello world"]
+
+
+def test_stream_with_no_text_yields_placeholder_not_frozen_dots(chat):
+    """If the stream never produces text (stopped early, or the model
+    returned nothing), the typing dots must not be left frozen on
+    screen."""
+    instance, cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    instance.ollama_client.chat.return_value = iter([{"message": {"content": ""}}])
+
+    outputs = list(instance.respond("hello", [], {}))
+
+    assert "typing-indicator" in outputs[0][0][-1]["content"]
+    assert "no response content" in outputs[-1][0][-1]["content"]
+
+
 def test_respond_rejects_oversized_message_without_calling_llm(chat):
     instance, _cursor = chat
     long_message = "x" * 100000

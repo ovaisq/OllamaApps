@@ -294,7 +294,14 @@ class ChromaChat:
         for chunk in stream:
             if stop_event.is_set():
                 break
-            answer += chunk.get("message", {}).get("content", "")
+            content = chunk.get("message", {}).get("content", "")
+            if not content:
+                # Ollama's first chunk is role-only (empty content).
+                # Yielding it replaced the typing indicator with an empty
+                # bubble that sat there for the whole prefill window --
+                # keep the dots up until real text arrives instead.
+                continue
+            answer += content
             yield answer
 
     def respond(self, message: str, chat_history: List[Dict], state: Dict, request: gr.Request = None):
@@ -351,6 +358,20 @@ class ChromaChat:
                 )
         except Exception as e:
             final_response = safe_error_message(e, logger)
+            yield (
+                chat_history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": final_response},
+                ],
+                "",
+                state,
+            )
+
+        if final_response is None:
+            # The stream produced no text (stopped before the first token,
+            # or the model returned nothing at all): don't leave the typing
+            # dots frozen on screen as if it were still thinking.
+            final_response = "(stopped)" if stop_event.is_set() else "(no response content)"
             yield (
                 chat_history + [
                     {"role": "user", "content": message},
@@ -418,7 +439,7 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
     """
     with gr.Blocks(title="Chatty") as blocks:
         with gr.Row():
-            gr.Markdown("# Chatty — Document & Drive Assistant")
+            gr.Markdown("# Chatty: Document & Drive Assistant")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):
