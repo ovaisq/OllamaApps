@@ -1,105 +1,98 @@
 #!/usr/bin/env python3
+"""Markdown Chatbot using Ollama, ChromaDB, and Gradio.
 
+This script implements a chatbot that uses local LLMs (via Ollama) to answer
+questions based on a knowledge base stored in ChromaDB. It supports
+conversation history, context retrieval, and real-time streaming of responses.
 """
-Markdown Chatbot using Ollama, ChromaDB, and Gradio.
-
-This script implements a chatbot that uses local LLMs (via Ollama) to answer questions based on a knowledge base stored in ChromaDB.
-It supports conversation history, context retrieval, and real-time streaming of responses.
-"""
-
-import ollama
-import chromadb
-import gradio as gr
-import threading
-import time
 import logging
+import os
+import threading
+from typing import Dict, List
 
-# ===== CONFIG =====
-CHAT_MODEL = 'phi4-mini'
-EMBEDD_MODEL = 'snowflake-arctic-embed'
-CHROMA_COLLECTION = "readme_rag"
-CHROMA_DB_PATH = "./chroma_db"
-OLLAMA_HOST = "http://"
-TOP_K = 3
-RELOAD_INTERVAL_SECONDS = 30  # seconds
-# ==================
+import chromadb
+import fastapi
+import gradio as gr
+import ollama
+
+from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
+from rag_common import embed_text, safe_error_message, validate_message, with_retries
+
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 logging.getLogger("chromadb").setLevel(logging.ERROR)
-
-client = ollama.Client(host=OLLAMA_HOST)
-chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-collection = chroma_client.get_collection(name=CHROMA_COLLECTION)
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
-def stop_chat(chat_history, history_state):
-    """
-    Stops the chat session by clearing input and returning current state.
+class ChromaChat:
+    def __init__(self):
+        self.ollama_client = ollama.Client(
+            host=OLLAMA_CONFIG["host"], timeout=OLLAMA_CONFIG["timeout"]
+        )
+        self.chroma_client = chromadb.PersistentClient(path=CHROMA_CONFIG["db_path"])
+        self._collection_lock = threading.Lock()
+        self._collection = self.chroma_client.get_collection(name=CHROMA_CONFIG["collection"])
+        self._stop_reload = threading.Event()
+        self._reload_thread = threading.Thread(target=self._background_reloader, daemon=True)
+        self._reload_thread.start()
 
-    Args:
-        chat_history (list): List of message dictionaries.
-        history_state (list): Internal conversation history list.
+    @property
+    def collection(self):
+        with self._collection_lock:
+            return self._collection
 
-    Returns:
-        tuple: Updated chat history, empty input string, and history state.
-    """
-    return chat_history, "", history_state
+    def _background_reloader(self):
+        while not self._stop_reload.wait(CHAT_CONFIG["reload_interval"]):
+            try:
+                new_collection = self.chroma_client.get_collection(
+                    name=CHROMA_CONFIG["collection"]
+                )
+                with self._collection_lock:
+                    self._collection = new_collection
+                logger.info("Index reloaded in background")
+            except Exception:
+                logger.exception("Failed to reload index")
 
+    def health_check(self) -> bool:
+        try:
+            self.collection.count()
+            return True
+        except Exception:
+            logger.exception("Health check failed")
+            return False
 
-def retrieve_context(query, k=TOP_K):
-    """
-    Retrieves the most relevant documents from ChromaDB based on a query embedding.
+    def retrieve_context(self, query: str) -> List[str]:
+        """Retrieve the most relevant documents from ChromaDB for a query."""
+        query_embedding = with_retries(
+            lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
+            attempts=OLLAMA_CONFIG["retry_attempts"],
+        )
+        results = self.collection.query(
+            query_embeddings=[query_embedding], n_results=CHAT_CONFIG["top_k"]
+        )
+        return results["documents"][0]
 
-    Args:
-        query (str): User's query text.
-        k (int): Number of top results to retrieve.
+    def get_last_conversation(self, history: List[Dict], pairs: int = 3) -> List[tuple]:
+        conv = []
+        i = len(history) - 1
+        while i > 0 and len(conv) < pairs:
+            if history[i]["role"] == "assistant" and history[i - 1]["role"] == "user":
+                conv.append((history[i - 1]["content"], history[i]["content"]))
+                i -= 2
+            else:
+                i -= 1
+        conv.reverse()
+        return conv
 
-    Returns:
-        list: List of document texts retrieved as context.
-    """
-    query_embedding = client.embeddings(model=EMBEDD_MODEL, prompt=query)["embedding"]
-    results = collection.query(query_embeddings=[query_embedding], n_results=k)
-    return results["documents"][0]
+    def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
+        context_chunks = self.retrieve_context(query)
+        context_text = "\n".join(context_chunks)
+        conversation_context = "\n".join(
+            f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
+        )
 
-
-def get_last_conversation(history, pairs=3):
-    """
-    Extracts the last few user-assistant conversation pairs from chat history.
-
-    Args:
-        history (list): Full chat history list.
-        pairs (int): Maximum number of pairs to extract.
-
-    Returns:
-        list: List of tuples containing (user_message, assistant_response).
-    """
-    conv = []
-    i = len(history) - 1
-    while i > 0 and len(conv) < pairs:
-        if history[i]['role'] == 'assistant' and history[i-1]['role'] == 'user':
-            conv.append((history[i-1]['content'], history[i]['content']))
-            i -= 2
-        else:
-            i -= 1
-    conv.reverse()  # chronological order
-    return conv
-
-
-def get_answer(query, history):
-    """
-    Generates a response to the user's query using context and conversation history.
-
-    Args:
-        query (str): User’s input question.
-        history (list): Conversation history.
-
-    Yields:
-        str: Streaming tokens of the generated answer.
-    """
-    context_chunks = retrieve_context(query)
-    context_text = "\n".join(context_chunks)
-    conversation_context = "\n".join([f"User: {u}\nAssistant: {a}" for u, a in get_last_conversation(history)])
-
-    prompt = f"""
+        prompt = f"""
 You are a helpful assistant. Use the following context to answer the question accurately.
 Context:
 {context_text}
@@ -111,72 +104,112 @@ Question: {query}
 Answer:
 """
 
-    stream = client.chat(model=CHAT_MODEL, options=dict(num_ctx=8192), messages=[{"role": "user", "content": prompt}], stream=True)
-    answer = ""
-    for chunk in stream:
-        token = chunk.get("message", {}).get("content", "")
-        answer += token
-        yield answer
-    return answer
+        stream = self.ollama_client.chat(
+            model=OLLAMA_CONFIG["chat_model"],
+            options={"num_ctx": CHAT_CONFIG["max_context_length"]},
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+        answer = ""
+        for chunk in stream:
+            if stop_event.is_set():
+                break
+            answer += chunk.get("message", {}).get("content", "")
+            yield answer
 
+    def respond(self, message: str, chat_history: List[Dict], state: Dict):
+        """Handle a new message. `state` is a per-session dict holding this
+        session's own stop Event so one user's Stop button can't affect
+        another user's in-flight stream.
+        """
+        if state is None:
+            state = {}
+        stop_event = state.setdefault("stop_event", threading.Event())
+        stop_event.clear()
 
-def respond(message, chat_history, history_state):
-    """
-    Handles a new message from the user and generates a response.
+        chat_history = chat_history or []
 
-    Args:
-        message (str): User input.
-        chat_history (list): Current chat messages.
-        history_state (list): Internal state of conversation.
-
-    Yields:
-        tuple: Updated chat history, empty input string, and updated history state.
-    """
-    chat_history = chat_history or []
-    response_gen = get_answer(message, chat_history)
-    partial = ""
-    for chunk in response_gen:
-        partial = chunk
-        yield chat_history + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": partial}
-        ], "", history_state
-    chat_history.append({"role": "user", "content": message})
-    chat_history.append({"role": "assistant", "content": partial})
-    yield chat_history, "", history_state
-
-
-def background_reloader(interval_seconds=RELOAD_INTERVAL_SECONDS):
-    """
-    Periodically reloads the ChromaDB collection in the background to reflect any changes.
-
-    Args:
-        interval_seconds (int): Interval between reload attempts.
-    """
-    global collection
-    while True:
         try:
-            collection = chroma_client.get_collection(name=CHROMA_COLLECTION)
-            print("[INFO] Index reloaded in background.")
+            validate_message(message, CHAT_CONFIG["max_message_length"])
+        except ValueError as e:
+            yield (
+                chat_history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": str(e)},
+                ],
+                "",
+                state,
+            )
+            return
+
+        try:
+            partial = ""
+            for partial in self.get_answer_stream(message, chat_history, stop_event):
+                if stop_event.is_set():
+                    break
+                yield (
+                    chat_history + [
+                        {"role": "user", "content": message},
+                        {"role": "assistant", "content": partial},
+                    ],
+                    "",
+                    state,
+                )
         except Exception as e:
-            print(f"[ERROR] Failed to reload index: {e}")
-        time.sleep(interval_seconds)
+            error_msg = safe_error_message(e, logger)
+            yield (
+                chat_history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": error_msg},
+                ],
+                "",
+                state,
+            )
+
+    def stop_chat(self, chat_history: List[Dict], state: Dict):
+        """Stop current chat response for this session only."""
+        if state is None:
+            state = {}
+        stop_event = state.setdefault("stop_event", threading.Event())
+        stop_event.set()
+        return (chat_history, "", state)
 
 
-# Start background reload thread
-reload_thread = threading.Thread(target=background_reloader, daemon=True)
-reload_thread.start()
+def main():
+    chat = ChromaChat()
 
+    with gr.Blocks(title="Markdown Chatbot", css="footer {display: none !important;}") as blocks:
+        gr.Markdown("# ChromaDB: Markdown Chatbot")
+        chatbot = gr.Chatbot(type="messages")
+        msg = gr.Textbox(label="Ask about the README")
+        stop_btn = gr.Button("Stop Chat")
+        state = gr.State(value={})
 
-with gr.Blocks(title="Markdown Chatbot", css='footer {display: none !important;}') as chat:
-    gr.Markdown("# ChromaDB: Markdown Chatbot")
-    chatbot = gr.Chatbot(type="messages")
-    msg = gr.Textbox(label="Ask about the README")
-    stop_btn = gr.Button("Stop Chat")
-    history_state = gr.State([])
+        msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
+        stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
 
-    msg.submit(respond, [msg, chatbot, history_state], [chatbot, msg, history_state], queue=True)
-    stop_btn.click(stop_chat, [chatbot, history_state], [chatbot, msg, history_state])
+    app = fastapi.FastAPI()
+
+    @app.get("/health")
+    def health():
+        ok = chat.health_check()
+        status_code = 200 if ok else 503
+        return fastapi.responses.JSONResponse(
+            {"status": "ok" if ok else "unavailable"}, status_code=status_code
+        )
+
+    try:
+        from gdrive_oauth_routes import register_routes as register_gdrive_routes
+        register_gdrive_routes(app)
+    except ImportError:
+        logger.info("gdrive_config.py not present; Google Drive OAuth routes disabled")
+
+    gr.mount_gradio_app(app, blocks.queue(), path="/")
+
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 7860)))
+
 
 if __name__ == "__main__":
-    chat.queue().launch(server_name='0.0.0.0')
+    main()

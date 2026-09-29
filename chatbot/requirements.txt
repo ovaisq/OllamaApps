@@ -3,3 +3,6 @@ gradio
 chromadb
 langchain
 psycopg2-binary
+pgvector
+httpx
+pypdf

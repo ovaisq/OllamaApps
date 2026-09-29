@@ -1,0 +1,108 @@
+"""Shared helpers used by both the pgvector and ChromaDB chatbot variants."""
+import hashlib
+import logging
+import os
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Callable, List, Tuple, Type
+
+logger = logging.getLogger(__name__)
+
+
+def load_env_file(env_path: Path = None) -> None:
+    """Load KEY=VALUE pairs from a .env file into os.environ (existing env
+    vars take precedence). Mirrors the no-dependency loader already used in
+    livetranscription/server.py.
+    """
+    env_path = env_path or Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+
+
+def normalize_text(text: str) -> str:
+    """Normalize whitespace in text."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def chunk_hash(text: str) -> str:
+    """Generate SHA256 hash of a text chunk, used as a stable dedupe key."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_markdown(file_path: str) -> str:
+    """Read markdown file content."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def create_chunks(text: str, chunk_size: int = 800, chunk_overlap: int = 100) -> List[str]:
+    """Split text into chunks using RecursiveCharacterTextSplitter."""
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    return splitter.split_text(text)
+
+
+def embed_text(client: Any, text: str, model: str, title: str = None) -> List[float]:
+    """Generate an embedding for a chunk of text (optionally titled) via Ollama."""
+    enriched = f"Title: {title}\nContent: {text}" if title else text
+    enriched = normalize_text(enriched)
+    return client.embeddings(model=model, prompt=enriched)["embedding"]
+
+
+def validate_message(message: str, max_length: int) -> str:
+    """Validate a user-supplied chat message.
+
+    Raises ValueError if the message is empty or exceeds max_length, so
+    callers can reject oversized input before it reaches the LLM/embedding
+    calls (cheap guard against accidental or malicious resource exhaustion).
+    """
+    if message is None or not message.strip():
+        raise ValueError("Message must not be empty.")
+    if len(message) > max_length:
+        raise ValueError(f"Message exceeds the {max_length} character limit.")
+    return message
+
+
+def with_retries(
+    fn: Callable[[], Any],
+    attempts: int = 3,
+    backoff_seconds: float = 0.5,
+    retry_on: Tuple[Type[BaseException], ...] = (Exception,),
+) -> Any:
+    """Call fn() with exponential backoff retries on the given exception types."""
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except retry_on as e:
+            last_exc = e
+            if attempt == attempts:
+                break
+            sleep_for = backoff_seconds * (2 ** (attempt - 1))
+            logger.warning(
+                "Attempt %d/%d failed (%s), retrying in %.1fs",
+                attempt, attempts, e, sleep_for,
+            )
+            time.sleep(sleep_for)
+    raise last_exc
+
+
+def safe_error_message(exc: Exception, log: logging.Logger = None) -> str:
+    """Log the full exception server-side and return a generic, correlated
+    message safe to show to end users (avoids leaking internals/stack traces).
+    """
+    error_id = uuid.uuid4().hex[:8]
+    (log or logger).error("error_id=%s request failed: %r", error_id, exc, exc_info=exc)
+    return f"Sorry, something went wrong processing your request (error id: {error_id})."

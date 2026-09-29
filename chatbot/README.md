@@ -18,8 +18,28 @@ This project provides a pipeline for indexing markdown content into a PostgreSQL
 
 ## Configuration
 
-Set environment variables:
+* **pgvector variant** (`pgv_chatty.py`, `pgv_indexer.py`): copy `pgv_config.py.template` to `pgv_config.py` and set env vars (`DB_NAME`, `DB_USER`, `DB_HOST`, `OLLAMA_HOST`, etc.) or export them directly.
+* **ChromaDB variant** (`chromadb_chatty.py`, `chromadb_indexer.py`): copy `chroma_config.py.template` to `chroma_config.py` and set env vars similarly.
+
+Both `*_config.py` files are gitignored — never commit real credentials.
 
 ```bash
 export OLLAMA_HOST="http://localhost:11434"
+```
+
+## Production notes
+
+* Retrieval uses real pgvector/Chroma nearest-neighbor search over query embeddings (not chunk length).
+* `pgv_chatty.py` uses a pooled, health-checked DB connection (`psycopg2.pool.ThreadedConnectionPool`).
+* Both chat apps validate message length, retry transient Ollama failures with backoff, and never leak internal exception details to end users (a correlation `error id` is logged server-side instead).
+* Both apps expose `GET /health` (200/503) for k8s liveness/readiness probes, alongside the Gradio UI on the same port.
+* The "Stop Response" button only stops the requesting browser session's stream, not every concurrent user's.
+
+## Tests
+
+```bash
+cd chatbot
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt pytest pgvector
+pytest tests/ -v
 ```

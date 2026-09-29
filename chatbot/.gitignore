@@ -1,1 +1,9 @@
 pgv_config.py
+chroma_config.py
+gdrive_config.py
+gdrive_token.json
+.venv/
+__pycache__/
+chroma_db/
+*.pyc
+.env

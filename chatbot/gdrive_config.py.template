@@ -1,0 +1,26 @@
+import os
+
+from rag_common import load_env_file
+
+load_env_file()
+
+GOOGLE_CONFIG = {
+    'client_id': os.getenv('GOOGLE_CLIENT_ID', ''),
+    'client_secret': os.getenv('GOOGLE_CLIENT_SECRET', ''),
+    # Must exactly match a redirect URI registered on this OAuth client in
+    # Google Cloud Console (APIs & Services -> Credentials).
+    'redirect_uri': os.getenv(
+        'GOOGLE_REDIRECT_URI', 'https://chatty.ifthenelse.net:7860/oauth2callback'
+    ),
+    # Required to hit GET /connect-drive; without it, the route refuses every
+    # request (see gdrive_oauth_routes.py). Generate with e.g. `openssl rand -hex 32`.
+    'admin_token': os.getenv('GDRIVE_ADMIN_TOKEN', ''),
+}
+
+DRIVE_CONFIG = {
+    # Optional: restrict indexing to one Drive folder. Leave blank to index
+    # every file the authorized account can see (bounded by the readonly scope).
+    'folder_id': os.getenv('GDRIVE_FOLDER_ID', ''),
+    # Where the long-lived refresh token is persisted between runs.
+    'token_store_path': os.getenv('GDRIVE_TOKEN_STORE', './gdrive_token.json'),
+}
