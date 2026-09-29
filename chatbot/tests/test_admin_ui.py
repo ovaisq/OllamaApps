@@ -18,15 +18,17 @@ def test_upload_and_index_indexes_markdown_and_reports_count(tmp_path):
 
     calls = {}
 
-    def index_text_fn(text, source):
+    def index_text_fn(text, source, extra_metadata=None):
         calls["text"] = text
         calls["source"] = source
+        calls["extra_metadata"] = extra_metadata
         return 3
 
     result = upload_and_index(str(f), index_text_fn)
 
     assert calls["source"] == "notes.md"
     assert "hello world" in calls["text"]
+    assert calls["extra_metadata"] == {"mime_type": "text/markdown"}
     assert result == "Indexed 3 new chunk(s) from notes.md."
 
 
@@ -34,7 +36,7 @@ def test_upload_and_index_hides_internal_errors(tmp_path):
     f = tmp_path / "notes.md"
     f.write_text("hello")
 
-    def index_text_fn(text, source):
+    def index_text_fn(text, source, extra_metadata=None):
         raise ConnectionError("db-password=hunter2")
 
     result = upload_and_index(str(f), index_text_fn)

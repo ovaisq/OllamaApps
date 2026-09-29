@@ -102,9 +102,59 @@ def test_respond_hides_internal_error_details_from_user(chat):
     assert "error id" in final_message
 
 
+def test_list_documents_filters_by_person_across_owner_and_shared_by(chat):
+    instance, cursor = chat
+    cursor.fetchall.return_value = [("Engineering Reports", "Jane", None, "application/pdf")]
+
+    instance.list_documents(person="Jen")
+
+    sql, params = cursor.execute.call_args.args
+    assert "ILIKE" in sql
+    assert params == ["%Jen%", "%Jen%"]
+
+
+def test_list_documents_filters_by_category_mime_types(chat):
+    instance, cursor = chat
+    cursor.fetchall.return_value = []
+
+    instance.list_documents(category="pdf")
+
+    sql, params = cursor.execute.call_args.args
+    assert "mime_type" in sql
+    assert params == [["application/pdf"]]
+
+
+def test_list_documents_returns_structured_dicts(chat):
+    instance, cursor = chat
+    cursor.fetchall.return_value = [("Engineering Reports", "Jane", "John", "application/pdf")]
+
+    docs = instance.list_documents()
+
+    assert docs == [{
+        "source": "Engineering Reports", "owner": "Jane",
+        "shared_by": "John", "mime_type": "application/pdf",
+    }]
+
+
+def test_get_answer_stream_routes_catalog_queries_away_from_embedding_search(chat):
+    """"Show me all documents shared by Jen" must not trigger an embedding
+    call / vector search -- it's a metadata enumeration, not a content
+    question, and top-k similarity search can't answer it completely.
+    """
+    instance, cursor = chat
+    cursor.fetchall.return_value = [("Engineering Reports", "Jane", "Jen", "application/pdf")]
+    instance.ollama_client.chat.return_value = iter([{"message": {"content": "Found it"}}])
+
+    list(instance.get_answer_stream("Show me all documents shared by Jen", [], MagicMock(is_set=lambda: False)))
+
+    instance.ollama_client.embeddings.assert_not_called()
+    messages = instance.ollama_client.chat.call_args.kwargs["messages"]
+    assert "Engineering Reports" in messages[1]["content"]
+
+
 def test_stop_chat_only_stops_its_own_session(chat):
     instance, cursor = chat
-    cursor.fetchall.return_value = [("chunk", "doc.md", 0.1)]
+    cursor.fetchall.return_value = [("chunk", {"source": "doc.md"}, 0.1)]
     instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
     instance.ollama_client.chat.return_value = iter(
         [{"message": {"content": "hi"}}, {"message": {"content": " there"}}]

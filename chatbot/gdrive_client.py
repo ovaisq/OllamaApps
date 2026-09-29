@@ -4,7 +4,7 @@ dependency (matches the httpx-against-raw-endpoints pattern used elsewhere in
 this repo).
 """
 import logging
-from typing import Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import httpx
 
@@ -25,18 +25,25 @@ _SUPPORTED_MIMES = {
 }
 
 
+_LIST_FIELDS = (
+    "id, name, mimeType, shared, webViewLink, modifiedTime, "
+    "owners(displayName, emailAddress), sharingUser(displayName, emailAddress)"
+)
+
+
 def list_files(access_token: str, folder_id: str = "") -> Iterator[Dict]:
-    """Yield {id, name, mimeType} for every supported file visible to the
-    account (or within folder_id, non-recursively, when given). Files seen
-    but skipped (unsupported type) are logged so a sync that "finds nothing"
-    is diagnosable without manually querying the Drive API.
+    """Yield Drive file dicts (id, name, mimeType, owners, sharingUser,
+    shared, webViewLink, modifiedTime) for every supported file visible to
+    the account (or within folder_id, non-recursively, when given). Files
+    seen but skipped (unsupported type) are logged so a sync that "finds
+    nothing" is diagnosable without manually querying the Drive API.
     """
     query_parts = ["trashed = false"]
     if folder_id:
         query_parts.append(f"'{folder_id}' in parents")
     params = {
         "q": " and ".join(query_parts),
-        "fields": "nextPageToken, files(id, name, mimeType)",
+        "fields": f"nextPageToken, files({_LIST_FIELDS})",
         "pageSize": 100,
         "supportsAllDrives": "true",
         "includeItemsFromAllDrives": "true",
@@ -66,6 +73,30 @@ def list_files(access_token: str, folder_id: str = "") -> Iterator[Dict]:
             page_token = data.get("nextPageToken")
             if not page_token:
                 break
+
+
+def extract_sharing_metadata(f: Dict) -> Dict:
+    """Pull owner/sharer info out of a Drive file dict (as returned by
+    list_files) into the flat, scalar-valued dict our metadata stores need.
+    sharingUser is only populated by Drive for files shared *with* the
+    authorized account, not ones it owns -- so "shared_by" is naturally
+    absent for the account's own files.
+    """
+    meta: Dict[str, Any] = {"mime_type": f.get("mimeType")}
+    owners = f.get("owners") or []
+    if owners:
+        owner = owners[0]
+        meta["owner"] = owner.get("displayName") or owner.get("emailAddress")
+    sharing_user = f.get("sharingUser") or {}
+    if sharing_user:
+        meta["shared_by"] = sharing_user.get("displayName") or sharing_user.get("emailAddress")
+    if f.get("shared"):
+        meta["shared"] = True
+    if f.get("webViewLink"):
+        meta["web_view_link"] = f["webViewLink"]
+    if f.get("modifiedTime"):
+        meta["modified_time"] = f["modifiedTime"]
+    return meta
 
 
 def fetch_file_text(access_token: str, file_id: str, mime_type: str) -> Optional[str]:

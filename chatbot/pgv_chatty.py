@@ -16,8 +16,13 @@ from admin_ui import build_admin_tab
 from auth_routes import register_routes as register_auth_routes
 from pgv_config import CHAT_CONFIG, DB_CONFIG, DB_POOL_CONFIG, OLLAMA_CONFIG
 from rag_common import (
+    CATEGORY_MIME_TYPES,
+    TYPING_INDICATOR_CSS,
+    TYPING_INDICATOR_HTML,
+    build_catalog_chat_messages,
     build_chat_messages,
     build_ollama_client,
+    detect_catalog_intent,
     embed_text,
     safe_error_message,
     validate_message,
@@ -82,9 +87,9 @@ class PGVectorChat:
             logger.exception("Health check failed")
             return False
 
-    def get_context_chunks(self, query: str) -> List[Tuple[str, Optional[str]]]:
-        """Retrieve the most relevant (chunk, source_document) pairs via
-        pgvector nearest-neighbor search.
+    def get_context_chunks(self, query: str) -> List[Tuple[str, Optional[Dict]]]:
+        """Retrieve the most relevant (chunk, metadata) pairs via pgvector
+        nearest-neighbor search.
         """
         query_embedding = with_retries(
             lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
@@ -93,7 +98,7 @@ class PGVectorChat:
         with self._connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT chunk, metadata->>'source' AS source, embedding <-> %s AS distance "
+                    "SELECT chunk, metadata, embedding <-> %s AS distance "
                     "FROM markdown_chunks ORDER BY distance LIMIT %s",
                     (Vector(query_embedding), CHAT_CONFIG["top_k"]),
                 )
@@ -107,6 +112,45 @@ class PGVectorChat:
             rows = [r for r in rows if r[2] <= max_distance]
 
         return [(r[0], r[1]) for r in rows]
+
+    def list_documents(
+        self, person: Optional[str] = None, category: Optional[str] = None,
+        shared_with_me: bool = False,
+    ) -> List[Dict]:
+        """Answer "show me all documents shared by X" / "list all PDFs"
+        style questions directly from stored metadata -- a filter/
+        enumeration question, not something embedding similarity search
+        can answer completely or reliably.
+        """
+        where_clauses = ["TRUE"]
+        params: List = []
+
+        if person:
+            where_clauses.append(
+                "(metadata->>'owner' ILIKE %s OR metadata->>'shared_by' ILIKE %s)"
+            )
+            pattern = f"%{person}%"
+            params.extend([pattern, pattern])
+
+        if category:
+            mime_types = list(CATEGORY_MIME_TYPES.get(category, set()))
+            if mime_types:
+                where_clauses.append("metadata->>'mime_type' = ANY(%s)")
+                params.append(mime_types)
+
+        if shared_with_me:
+            where_clauses.append("metadata->>'shared' = 'true'")
+
+        query = (
+            "SELECT DISTINCT metadata->>'source' AS source, metadata->>'owner' AS owner, "
+            "metadata->>'shared_by' AS shared_by, metadata->>'mime_type' AS mime_type "
+            f"FROM markdown_chunks WHERE {' AND '.join(where_clauses)}"
+        )
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, params)
+                cols = ("source", "owner", "shared_by", "mime_type")
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_last_conversation(self, history: List[Dict], count: int = 2) -> List[tuple]:
         """Get last conversation turns."""
@@ -122,13 +166,17 @@ class PGVectorChat:
 
     def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
         """Generate streaming response."""
-        context_chunks = self.get_context_chunks(query)
-
         conversation_context = "\n".join(
             f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
         )
 
-        messages = build_chat_messages(context_chunks, conversation_context, query)
+        catalog_intent = detect_catalog_intent(query)
+        if catalog_intent:
+            docs = self.list_documents(**catalog_intent)
+            messages = build_catalog_chat_messages(docs, conversation_context, query)
+        else:
+            context_chunks = self.get_context_chunks(query)
+            messages = build_chat_messages(context_chunks, conversation_context, query)
 
         response_stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
@@ -163,6 +211,8 @@ class PGVectorChat:
             yield (new_history + [{"role": "assistant", "content": str(e)}], "", state)
             return
 
+        yield (new_history + [{"role": "assistant", "content": TYPING_INDICATOR_HTML}], "", state)
+
         try:
             for partial_response in self.get_answer_stream(message, history, stop_event):
                 if stop_event.is_set():
@@ -190,11 +240,11 @@ class PGVectorChat:
                 cursor.execute("SELECT COUNT(*) FROM markdown_chunks")
                 return cursor.fetchone()[0]
 
-    def index_text(self, text: str, source: str) -> int:
+    def index_text(self, text: str, source: str, extra_metadata: dict = None) -> int:
         from pgv_indexer import index_text
 
         with self._connection() as conn:
-            return index_text(text, source, conn)
+            return index_text(text, source, conn, extra_metadata=extra_metadata)
 
     def sync_drive(self) -> int:
         from gdrive_indexer import get_access_token, run_pgvector_backend
@@ -207,9 +257,9 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
     instance. Split out from main() so the UI construction (which uses a real
     Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
     """
-    with gr.Blocks(title="Markdown Document Chatbot") as chatty:
+    with gr.Blocks(title="Chatty") as chatty:
         with gr.Row():
-            gr.Markdown("# Markdown Document Chatbot")
+            gr.Markdown("# Chatty — Document & Drive Assistant")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):
@@ -246,7 +296,7 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
         path="/",
         footer_links=[],
         theme="JohnSmith9982/small_and_pretty",
-        css="#signout-link {text-align: right;}",
+        css=f"#signout-link {{text-align: right;}}\n{TYPING_INDICATOR_CSS}",
     )
     return app
 

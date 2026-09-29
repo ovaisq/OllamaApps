@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from gdrive_config import DRIVE_CONFIG, GOOGLE_CONFIG
 from gdrive_auth import refresh_access_token
-from gdrive_client import fetch_file_text, list_files
+from gdrive_client import extract_sharing_metadata, fetch_file_text, list_files
 from gdrive_token_store import load_refresh_token
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
@@ -61,7 +61,7 @@ def run_pgvector_backend(access_token: str) -> int:
         # aren't safe to share across concurrent threads.
         conn = psycopg2.connect(**DB_CONFIG)
         try:
-            return index_text(text, f["name"], conn)
+            return index_text(text, f["name"], conn, extra_metadata=extract_sharing_metadata(f))
         finally:
             conn.close()
 
@@ -83,7 +83,7 @@ def run_chromadb_backend(access_token: str) -> int:
         text = fetch_file_text(access_token, f["id"], f["mimeType"])
         if not text or not text.strip():
             return 0
-        return index_text(text, f["name"], collection, client)
+        return index_text(text, f["name"], collection, client, extra_metadata=extract_sharing_metadata(f))
 
     files = list(list_files(access_token, DRIVE_CONFIG["folder_id"]))
     return _process_files_concurrently(files, process_one)

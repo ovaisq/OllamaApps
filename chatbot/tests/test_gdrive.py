@@ -118,6 +118,36 @@ def test_list_files_logs_and_skips_unsupported_mime_types():
     assert "image.png" in mock_logger.info.call_args.args
 
 
+def test_extract_sharing_metadata_captures_owner_and_sharer():
+    f = {
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+        "owners": [{"displayName": "Jane Doe", "emailAddress": "jane@example.com"}],
+        "sharingUser": {"displayName": "Jen Smith", "emailAddress": "jen@example.com"},
+        "shared": True,
+        "webViewLink": "https://docs.google.com/x",
+        "modifiedTime": "2024-01-01T00:00:00Z",
+    }
+    meta = gdrive_client.extract_sharing_metadata(f)
+    assert meta == {
+        "mime_type": "application/vnd.google-apps.spreadsheet",
+        "owner": "Jane Doe",
+        "shared_by": "Jen Smith",
+        "shared": True,
+        "web_view_link": "https://docs.google.com/x",
+        "modified_time": "2024-01-01T00:00:00Z",
+    }
+
+
+def test_extract_sharing_metadata_omits_absent_fields():
+    """A file owned (not shared with) the account has no sharingUser --
+    that key must be omitted, not set to None (Chroma metadata rejects
+    None values, and it'd be misleading in Postgres JSONB too).
+    """
+    f = {"mimeType": "application/pdf", "owners": [], "shared": False}
+    meta = gdrive_client.extract_sharing_metadata(f)
+    assert meta == {"mime_type": "application/pdf"}
+
+
 def test_token_store_round_trips_refresh_token(tmp_path):
     path = str(tmp_path / "token.json")
     gdrive_token_store.save_refresh_token(path, "my-refresh-token")

@@ -18,8 +18,13 @@ from admin_ui import build_admin_tab
 from auth_routes import register_routes as register_auth_routes
 from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
 from rag_common import (
+    CATEGORY_MIME_TYPES,
+    TYPING_INDICATOR_CSS,
+    TYPING_INDICATOR_HTML,
+    build_catalog_chat_messages,
     build_chat_messages,
     build_ollama_client,
+    detect_catalog_intent,
     embed_text,
     safe_error_message,
     validate_message,
@@ -68,8 +73,8 @@ class ChromaChat:
             logger.exception("Health check failed")
             return False
 
-    def retrieve_context(self, query: str) -> List[Tuple[str, Optional[str]]]:
-        """Retrieve the most relevant (chunk, source_document) pairs from ChromaDB."""
+    def retrieve_context(self, query: str) -> List[Tuple[str, Optional[Dict]]]:
+        """Retrieve the most relevant (chunk, metadata) pairs from ChromaDB."""
         query_embedding = with_retries(
             lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
             attempts=OLLAMA_CONFIG["retry_attempts"],
@@ -90,7 +95,41 @@ class ChromaChat:
         if max_distance is not None:
             rows = [r for r in rows if r[2] is not None and r[2] <= max_distance]
 
-        return [(text, (meta or {}).get("source")) for text, meta, _ in rows]
+        return [(text, meta) for text, meta, _ in rows]
+
+    def list_documents(
+        self, person: Optional[str] = None, category: Optional[str] = None,
+        shared_with_me: bool = False,
+    ) -> List[Dict]:
+        """Answer "show me all documents shared by X" / "list all PDFs"
+        style questions directly from stored metadata. Chroma has no
+        substring/ILIKE `where` filter, so this fetches all metadatas (fine
+        at personal/small-collection scale) and filters in Python.
+        """
+        all_metadatas = self.collection.get(include=["metadatas"]).get("metadatas") or []
+        mime_types = CATEGORY_MIME_TYPES.get(category, set()) if category else None
+
+        seen_sources = set()
+        docs = []
+        for meta in all_metadatas:
+            meta = meta or {}
+            source = meta.get("source")
+            if not source or source in seen_sources:
+                continue
+            if person:
+                owner, shared_by = (meta.get("owner") or ""), (meta.get("shared_by") or "")
+                if person.lower() not in owner.lower() and person.lower() not in shared_by.lower():
+                    continue
+            if mime_types and meta.get("mime_type") not in mime_types:
+                continue
+            if shared_with_me and not meta.get("shared"):
+                continue
+            seen_sources.add(source)
+            docs.append({
+                "source": source, "owner": meta.get("owner"),
+                "shared_by": meta.get("shared_by"), "mime_type": meta.get("mime_type"),
+            })
+        return docs
 
     def get_last_conversation(self, history: List[Dict], pairs: int = 3) -> List[tuple]:
         conv = []
@@ -105,12 +144,17 @@ class ChromaChat:
         return conv
 
     def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
-        context_chunks = self.retrieve_context(query)
         conversation_context = "\n".join(
             f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
         )
 
-        messages = build_chat_messages(context_chunks, conversation_context, query)
+        catalog_intent = detect_catalog_intent(query)
+        if catalog_intent:
+            docs = self.list_documents(**catalog_intent)
+            messages = build_catalog_chat_messages(docs, conversation_context, query)
+        else:
+            context_chunks = self.retrieve_context(query)
+            messages = build_chat_messages(context_chunks, conversation_context, query)
 
         stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
@@ -150,6 +194,15 @@ class ChromaChat:
             )
             return
 
+        yield (
+            chat_history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": TYPING_INDICATOR_HTML},
+            ],
+            "",
+            state,
+        )
+
         try:
             partial = ""
             for partial in self.get_answer_stream(message, chat_history, stop_event):
@@ -185,10 +238,10 @@ class ChromaChat:
     def count_chunks(self) -> int:
         return self.collection.count()
 
-    def index_text(self, text: str, source: str) -> int:
+    def index_text(self, text: str, source: str, extra_metadata: dict = None) -> int:
         from chromadb_indexer import index_text
 
-        return index_text(text, source, self.collection, self.ollama_client)
+        return index_text(text, source, self.collection, self.ollama_client, extra_metadata=extra_metadata)
 
     def sync_drive(self) -> int:
         from gdrive_indexer import get_access_token, run_chromadb_backend
@@ -201,9 +254,9 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
     instance. Split out from main() so the UI construction (which uses a real
     Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
     """
-    with gr.Blocks(title="Markdown Chatbot") as blocks:
+    with gr.Blocks(title="Chatty") as blocks:
         with gr.Row():
-            gr.Markdown("# ChromaDB: Markdown Chatbot")
+            gr.Markdown("# Chatty — Document & Drive Assistant")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
         with gr.Tab("Chat"):
@@ -236,7 +289,7 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
         blocks.queue(),
         path="/",
         footer_links=[],
-        css="#signout-link {text-align: right;}",
+        css=f"#signout-link {{text-align: right;}}\n{TYPING_INDICATOR_CSS}",
     )
     return app
 

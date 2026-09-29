@@ -28,11 +28,14 @@ def get_existing_chunks(cursor) -> set:
     cursor.execute("SELECT chunk FROM markdown_chunks")
     return {normalize_text(row[0]) for row in cursor.fetchall()}
 
-def index_text(text: str, source: str, db_connection) -> int:
+def index_text(text: str, source: str, db_connection, extra_metadata: dict = None) -> int:
     """Chunk, embed, and insert new (deduped) content into the database.
 
     Shared by the markdown-file indexer and the Google Drive indexer so both
-    sources dedupe/embed/insert identically.
+    sources dedupe/embed/insert identically. extra_metadata (Drive owner/
+    sharer/mimeType, etc.) is merged into the stored metadata alongside
+    "source" so catalog-style queries ("documents shared by X") can filter
+    on it later without a schema migration (metadata is JSONB).
     """
     chunks = create_chunks(
         text,
@@ -58,8 +61,9 @@ def index_text(text: str, source: str, db_connection) -> int:
                 INSERT INTO markdown_chunks (chunk, embedding, metadata)
                 VALUES (%s, %s, %s)
             """
+            metadata = {"source": source, **(extra_metadata or {})}
             values = [
-                (chunk, embedding, Json({"source": source}))
+                (chunk, embedding, Json(metadata))
                 for chunk, embedding in new_chunks
             ]
             cursor.executemany(insert_query, values)

@@ -25,22 +25,26 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(m
 logger = logging.getLogger(__name__)
 
 
-def index_text(text: str, source: str, collection, client) -> int:
+def index_text(text: str, source: str, collection, client, extra_metadata: dict = None) -> int:
     """Chunk, embed, and add new (deduped) content to the ChromaDB collection.
 
     Shared by the markdown-file indexer and the Google Drive indexer so both
-    sources dedupe/embed/insert identically.
+    sources dedupe/embed/insert identically. extra_metadata (Drive owner/
+    sharer/mimeType, etc.) is merged into the stored metadata alongside
+    "source" so catalog-style queries ("documents shared by X") can filter
+    on it later.
     """
     chunks = create_chunks(text, INDEXER_CONFIG["chunk_size"], INDEXER_CONFIG["chunk_overlap"])
 
     existing_ids = set(collection.get(limit=None).get("ids", []))
 
+    metadata = {"source": source, **(extra_metadata or {})}
     unique_data = {}
     for chunk in chunks:
         cid = chunk_hash(chunk)
         if cid not in existing_ids and cid not in unique_data:
             embedding = embed_text(client, chunk, OLLAMA_CONFIG["embedding_model"], title=source)
-            unique_data[cid] = (normalize_text(chunk), embedding, {"source": source})
+            unique_data[cid] = (normalize_text(chunk), embedding, metadata)
 
     if not unique_data:
         logger.info("No new chunks to add from %s. Index is up to date.", source)

@@ -15,16 +15,30 @@ from rag_common import extract_text_from_upload, safe_error_message
 
 logger = logging.getLogger(__name__)
 
+# So uploaded files get the same "mime_type" metadata Drive-sourced content
+# does, letting "list all PDFs"/"list all spreadsheets" catch uploads too.
+_EXTENSION_MIME_TYPES = {
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".pdf": "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
 
 def upload_and_index(file_path: str, index_text_fn) -> str:
-    """index_text_fn(text: str, source: str) -> int chunks_added."""
+    """index_text_fn(text: str, source: str, extra_metadata: dict = None) -> int chunks_added."""
     if not file_path:
         return "No file selected."
     text = extract_text_from_upload(file_path)
     if not text or not text.strip():
         return "No extractable text found in that file (supported: .md, .txt, .pdf, .xlsx)."
+    ext = os.path.splitext(file_path)[1].lower()
+    mime_type = _EXTENSION_MIME_TYPES.get(ext)
     try:
-        added = index_text_fn(text, os.path.basename(file_path))
+        added = index_text_fn(
+            text, os.path.basename(file_path),
+            extra_metadata={"mime_type": mime_type} if mime_type else None,
+        )
     except Exception as e:
         return safe_error_message(e, logger)
     return f"Indexed {added} new chunk(s) from {os.path.basename(file_path)}."

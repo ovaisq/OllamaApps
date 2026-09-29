@@ -3,13 +3,17 @@ from unittest.mock import MagicMock
 import pytest
 
 from rag_common import (
+    build_catalog_chat_messages,
     build_chat_messages,
     build_ollama_client,
     chunk_hash,
     create_chunks,
+    detect_catalog_intent,
     extract_text_from_upload,
     extract_xlsx_text,
     format_context_chunks,
+    format_document_catalog,
+    format_source_label,
     normalize_text,
     safe_error_message,
     validate_message,
@@ -17,15 +21,71 @@ from rag_common import (
 )
 
 
+def test_detect_catalog_intent_extracts_person_from_shared_by_phrasing():
+    intent = detect_catalog_intent("Show me all documents shared by Jen")
+    assert intent == {"person": "Jen", "category": None, "shared_with_me": False}
+
+
+def test_detect_catalog_intent_matches_category_with_listing_verb():
+    intent = detect_catalog_intent("list all PDFs")
+    assert intent == {"person": None, "category": "pdf", "shared_with_me": False}
+
+
+def test_detect_catalog_intent_matches_shared_with_me():
+    intent = detect_catalog_intent("what's shared with me?")
+    assert intent["shared_with_me"] is True
+
+
+def test_detect_catalog_intent_returns_none_for_normal_content_questions():
+    """A category keyword alone, with no listing verb, is a normal content
+    question ("what does the engineering doc say about X"), not a catalog
+    enumeration request -- must not hijack ordinary RAG queries.
+    """
+    assert detect_catalog_intent("what is python?") is None
+    assert detect_catalog_intent("summarize the onboarding doc") is None
+
+
+def test_format_document_catalog_lists_each_document():
+    text = format_document_catalog([
+        {"source": "Engineering Reports", "owner": "Jane", "shared_by": None, "mime_type": None},
+    ])
+    assert text == "- Engineering Reports | owner: Jane"
+
+
+def test_format_document_catalog_empty_says_no_matches():
+    assert format_document_catalog([]) == "(no matching documents found)"
+
+
+def test_build_catalog_chat_messages_frames_as_document_listing():
+    messages = build_catalog_chat_messages(
+        [{"source": "doc.md", "owner": None, "shared_by": None, "mime_type": None}], "", "list all docs"
+    )
+    assert messages[0]["role"] == "system"
+    assert "Matching documents found" in messages[1]["content"]
+    assert "doc.md" in messages[1]["content"]
+
+
 def test_format_context_chunks_tags_each_chunk_with_its_source():
-    text = format_context_chunks([("chunk one", "doc_a.md"), ("chunk two", "doc_b.pdf")])
-    assert "[Source: doc_a.md]\nchunk one" in text
-    assert "[Source: doc_b.pdf]\nchunk two" in text
+    text = format_context_chunks([
+        ("chunk one", {"source": "doc_a.md"}), ("chunk two", {"source": "doc_b.pdf"}),
+    ])
+    assert "[doc_a.md]\nchunk one" in text
+    assert "[doc_b.pdf]\nchunk two" in text
 
 
 def test_format_context_chunks_labels_missing_source():
     text = format_context_chunks([("orphan chunk", None)])
-    assert "[Source: unknown source]" in text
+    assert "[unknown source]" in text
+
+
+def test_format_source_label_includes_owner_and_sharer():
+    label = format_source_label({"source": "Engineering Reports", "owner": "Jane", "shared_by": "John"})
+    assert label == "Engineering Reports | owner: Jane | shared by: John"
+
+
+def test_format_source_label_omits_shared_by_when_same_as_owner():
+    label = format_source_label({"source": "doc.md", "owner": "Jane", "shared_by": "Jane"})
+    assert label == "doc.md | owner: Jane"
 
 
 def test_format_context_chunks_empty_says_nothing_found():
@@ -39,7 +99,7 @@ def test_build_chat_messages_splits_system_and_user_roles():
     general-knowledge questions (e.g. "python") from its own training data
     instead of grounding in (or admitting it found nothing in) the context.
     """
-    messages = build_chat_messages([("some chunk", "doc.md")], "", "what is X?")
+    messages = build_chat_messages([("some chunk", {"source": "doc.md"})], "", "what is X?")
 
     assert messages[0]["role"] == "system"
     assert "Context (grouped" not in messages[0]["content"]  # data lives in the user message

@@ -35,7 +35,9 @@ def test_run_pgvector_backend_skips_files_with_no_extractable_text():
         total = gdrive_indexer.run_pgvector_backend("access-token")
 
     assert total == 3
-    mock_index_text.assert_called_once_with("hello world", "a.md", mock_conn)
+    mock_index_text.assert_called_once_with(
+        "hello world", "a.md", mock_conn, extra_metadata={"mime_type": "text/markdown"}
+    )
     mock_conn.close.assert_called_once()
 
 
