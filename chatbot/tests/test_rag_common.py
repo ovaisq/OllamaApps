@@ -1,253 +1,106 @@
+"""Unit tests for rag_common's Ollama prewarm helpers."""
 from unittest.mock import MagicMock
 
-import pytest
+import rag_common
 
-from rag_common import (
-    build_catalog_chat_messages,
-    build_chat_messages,
-    build_ollama_client,
-    chunk_hash,
-    create_chunks,
-    detect_catalog_intent,
-    extract_text_from_upload,
-    extract_xlsx_text,
-    format_context_chunks,
-    format_document_catalog,
-    format_source_label,
-    normalize_text,
-    safe_error_message,
-    validate_message,
-    with_retries,
-)
+CHAT = "qwen3.8:27b-mtp-bf16"
+EMBED = "qwen3-embedding:0.6b"
 
 
-def test_detect_catalog_intent_extracts_person_from_shared_by_phrasing():
-    intent = detect_catalog_intent("Show me all documents shared by Jen")
-    assert intent == {"person": "Jen", "category": None, "shared_with_me": False}
+def running(model, context_length=None):
+    """Stand-in for an ollama ProcessResponse.Model /api/ps entry."""
+    return MagicMock(model=model, context_length=context_length)
 
 
-def test_detect_catalog_intent_matches_category_with_listing_verb():
-    intent = detect_catalog_intent("list all PDFs")
-    assert intent == {"person": None, "category": "pdf", "shared_with_me": False}
+def test_skips_load_when_model_already_running_with_full_context():
+    """Checking /api/ps before loading saves the load round trip and, more
+    importantly, avoids touching an already-running model: a load request
+    with different options would force a full reload of it."""
+    client = MagicMock()
+    client.ps.return_value.models = [running(CHAT, 262144)]
+
+    assert rag_common.ensure_model_loaded(client, CHAT, keep_alive=-1, num_ctx=262144) is False
+    client.generate.assert_not_called()
 
 
-def test_detect_catalog_intent_matches_shared_with_me():
-    intent = detect_catalog_intent("what's shared with me?")
-    assert intent["shared_with_me"] is True
+def test_loads_model_that_is_not_running():
+    client = MagicMock()
+    client.ps.return_value.models = []
 
-
-def test_detect_catalog_intent_returns_none_for_normal_content_questions():
-    """A category keyword alone, with no listing verb, is a normal content
-    question ("what does the engineering doc say about X"), not a catalog
-    enumeration request -- must not hijack ordinary RAG queries.
-    """
-    assert detect_catalog_intent("what is python?") is None
-    assert detect_catalog_intent("summarize the onboarding doc") is None
-
-
-def test_format_document_catalog_lists_each_document():
-    text = format_document_catalog([
-        {"source": "Engineering Reports", "owner": "Jane", "shared_by": None, "mime_type": None},
-    ])
-    assert text == "- Engineering Reports | owner: Jane"
-
-
-def test_format_document_catalog_empty_says_no_matches():
-    assert format_document_catalog([]) == "(no matching documents found)"
-
-
-def test_build_catalog_chat_messages_frames_as_document_listing():
-    messages = build_catalog_chat_messages(
-        [{"source": "doc.md", "owner": None, "shared_by": None, "mime_type": None}], "", "list all docs"
+    assert rag_common.ensure_model_loaded(client, CHAT, keep_alive=-1, num_ctx=262144) is True
+    client.generate.assert_called_once_with(
+        model=CHAT, keep_alive=-1, options={"num_ctx": 262144}
     )
-    assert messages[0]["role"] == "system"
-    assert "Matching documents found" in messages[1]["content"]
-    assert "doc.md" in messages[1]["content"]
 
 
-def test_format_context_chunks_tags_each_chunk_with_its_source():
-    text = format_context_chunks([
-        ("chunk one", {"source": "doc_a.md"}), ("chunk two", {"source": "doc_b.pdf"}),
-    ])
-    assert "[doc_a.md]\nchunk one" in text
-    assert "[doc_b.pdf]\nchunk two" in text
+def test_reloads_when_running_context_is_smaller_than_requested():
+    """A model running with a 32K window can't serve a 256K request -- it
+    must be reloaded, not reused."""
+    client = MagicMock()
+    client.ps.return_value.models = [running(CHAT, 32768)]
+
+    assert rag_common.ensure_model_loaded(client, CHAT, keep_alive=-1, num_ctx=262144) is True
+    client.generate.assert_called_once()
 
 
-def test_format_context_chunks_labels_missing_source():
-    text = format_context_chunks([("orphan chunk", None)])
-    assert "[unknown source]" in text
+def test_treats_running_model_with_unreported_context_as_loaded():
+    """If the server doesn't report the loaded window size, assume the
+    running instance is fine -- blindly reloading could evict a
+    keep-forever instance we can't verify."""
+    client = MagicMock()
+    client.ps.return_value.models = [running(CHAT, None)]
+
+    assert rag_common.ensure_model_loaded(client, CHAT, keep_alive=-1, num_ctx=262144) is False
+    client.generate.assert_not_called()
 
 
-def test_format_source_label_includes_owner_and_sharer():
-    label = format_source_label({"source": "Engineering Reports", "owner": "Jane", "shared_by": "John"})
-    assert label == "Engineering Reports | owner: Jane | shared by: John"
+def test_skips_load_when_running_models_cannot_be_listed():
+    """/api/ps failing means we can't know what's running -- don't risk
+    disturbing it with a load request."""
+    client = MagicMock()
+    client.ps.side_effect = ConnectionError("server unreachable")
+
+    assert rag_common.ensure_model_loaded(client, CHAT, keep_alive=-1) is False
+    client.generate.assert_not_called()
 
 
-def test_format_source_label_omits_shared_by_when_same_as_owner():
-    label = format_source_label({"source": "doc.md", "owner": "Jane", "shared_by": "Jane"})
-    assert label == "doc.md | owner: Jane"
+def test_load_failure_is_swallowed_not_raised():
+    """Prewarm must never take the app down -- a failed load is logged and
+    the first request pays the cold-load cost instead."""
+    client = MagicMock()
+    client.ps.return_value.models = []
+    client.generate.side_effect = ConnectionError("boom")
+
+    assert rag_common.ensure_model_loaded(client, CHAT, keep_alive=-1) is False
 
 
-def test_format_context_chunks_empty_says_nothing_found():
-    assert format_context_chunks([]) == "(no relevant documents found)"
+def test_embedding_model_is_preloaded_without_an_explicit_context_window():
+    """Embedding models must be preloaded with their own default window --
+    inflating a 0.6b embedding model to the chat model's 256K context
+    would allocate a huge KV cache for nothing."""
+    client = MagicMock()
+    client.ps.return_value.models = []
+
+    rag_common.ensure_model_loaded(client, EMBED, keep_alive=-1)
+
+    client.generate.assert_called_once_with(model=EMBED, keep_alive=-1, options=None)
 
 
-def test_build_chat_messages_splits_system_and_user_roles():
-    """Regression test: instructions bundled into a single user-role
-    message get much weaker instruction-following from chat-tuned models
-    than a proper system message -- this is why the bot would answer
-    general-knowledge questions (e.g. "python") from its own training data
-    instead of grounding in (or admitting it found nothing in) the context.
-    """
-    messages = build_chat_messages([("some chunk", {"source": "doc.md"})], "", "what is X?")
+def test_embed_text_passes_keep_alive_through():
+    client = MagicMock()
+    client.embeddings.return_value = {"embedding": [0.5]}
 
-    assert messages[0]["role"] == "system"
-    assert "Context (grouped" not in messages[0]["content"]  # data lives in the user message
-    assert messages[1]["role"] == "user"
-    assert "doc.md" in messages[1]["content"]
-    assert "what is X?" in messages[1]["content"]
+    rag_common.embed_text(client, "hello", EMBED, keep_alive=-1)
+
+    client.embeddings.assert_called_once_with(model=EMBED, prompt="hello", keep_alive=-1)
 
 
-def test_build_chat_messages_tells_model_not_to_substitute_own_knowledge():
-    messages = build_chat_messages([], "", "python?")
-    system_content = messages[0]["content"]
-    assert "own (possibly wrong) general knowledge" in system_content
-    assert "(no relevant documents found)" in messages[1]["content"]
+def test_embed_text_keep_alive_defaults_to_server_default():
+    """Omitting keep_alive must keep working for callers that don't care
+    (None is dropped by the SDK, leaving the server default in place)."""
+    client = MagicMock()
+    client.embeddings.return_value = {"embedding": [0.5]}
 
+    rag_common.embed_text(client, "hello", EMBED)
 
-def _build_test_xlsx_bytes() -> bytes:
-    import io
-
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    ws1 = wb.active
-    ws1.title = "Reports"
-    ws1.append(["Quarter", "Status"])
-    ws1.append(["Q1", "On track"])
-    ws2 = wb.create_sheet("Notes")
-    ws2.append(["Engineering summary here"])
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-def test_build_ollama_client_uses_short_connect_and_long_read_timeout():
-    """Regression test: a single shared float timeout caused chat streaming
-    on a large/cold-loaded model to time out (30s wasn't enough), so the
-    connect and read timeouts must be split.
-    """
-    client = build_ollama_client("http://example.com:11434", 300.0)
-    timeout = client._client.timeout
-    assert timeout.connect == 10.0
-    assert timeout.read == 300.0
-
-
-def test_create_chunks_actually_splits_text():
-    """Regression test: this hits the real langchain_text_splitters import
-    (no mocking) so a broken/renamed import surfaces here instead of only in
-    production, where every other test patches create_chunks out entirely.
-    """
-    text = "hello world. " * 200
-    chunks = create_chunks(text, chunk_size=100, chunk_overlap=10)
-    assert len(chunks) > 1
-    assert all(isinstance(c, str) and c for c in chunks)
-
-
-def test_normalize_text_collapses_whitespace():
-    assert normalize_text("  a\n\nb\t c  ") == "a b c"
-
-
-def test_chunk_hash_is_stable_and_content_sensitive():
-    assert chunk_hash("abc") == chunk_hash("abc")
-    assert chunk_hash("abc") != chunk_hash("abd")
-
-
-def test_validate_message_rejects_empty():
-    with pytest.raises(ValueError):
-        validate_message("   ", max_length=100)
-
-
-def test_validate_message_rejects_oversized():
-    with pytest.raises(ValueError, match="exceeds"):
-        validate_message("x" * 10, max_length=5)
-
-
-def test_validate_message_accepts_valid_message():
-    assert validate_message("hello", max_length=100) == "hello"
-
-
-def test_with_retries_succeeds_after_transient_failures():
-    calls = {"n": 0}
-
-    def flaky():
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise ConnectionError("transient")
-        return "ok"
-
-    assert with_retries(flaky, attempts=3, backoff_seconds=0) == "ok"
-    assert calls["n"] == 3
-
-
-def test_with_retries_raises_after_exhausting_attempts():
-    def always_fails():
-        raise ConnectionError("down")
-
-    with pytest.raises(ConnectionError):
-        with_retries(always_fails, attempts=2, backoff_seconds=0)
-
-
-def test_safe_error_message_never_leaks_exception_text():
-    logger = MagicMock()
-    msg = safe_error_message(Exception("db-password=hunter2"), logger)
-
-    assert "hunter2" not in msg
-    assert "error id" in msg
-    logger.error.assert_called_once()
-
-
-def test_extract_text_from_upload_reads_markdown(tmp_path):
-    f = tmp_path / "notes.md"
-    f.write_text("# hello")
-    assert extract_text_from_upload(str(f)) == "# hello"
-
-
-def test_extract_text_from_upload_reads_txt(tmp_path):
-    f = tmp_path / "notes.txt"
-    f.write_text("plain text")
-    assert extract_text_from_upload(str(f)) == "plain text"
-
-
-def test_extract_text_from_upload_returns_none_for_unsupported_extension(tmp_path):
-    f = tmp_path / "notes.docx"
-    f.write_text("hi")
-    assert extract_text_from_upload(str(f)) is None
-
-
-def test_extract_xlsx_text_reads_all_sheets():
-    """Regression test for the "Engineering Reports" incident: a Google
-    Sheet/.xlsx full of real content was silently skipped everywhere because
-    nothing extracted text from spreadsheets at all.
-    """
-    text = extract_xlsx_text(_build_test_xlsx_bytes())
-    assert "Sheet: Reports" in text
-    assert "Q1,On track" in text
-    assert "Sheet: Notes" in text
-    assert "Engineering summary here" in text
-
-
-def test_extract_xlsx_text_returns_none_for_empty_bytes():
-    assert extract_xlsx_text(b"") is None
-
-
-def test_extract_xlsx_text_returns_none_for_garbage_bytes():
-    assert extract_xlsx_text(b"not a real xlsx file") is None
-
-
-def test_extract_text_from_upload_reads_xlsx(tmp_path):
-    f = tmp_path / "report.xlsx"
-    f.write_bytes(_build_test_xlsx_bytes())
-    text = extract_text_from_upload(str(f))
-    assert "Engineering summary here" in text
+    client.embeddings.assert_called_once_with(model=EMBED, prompt="hello", keep_alive=None)

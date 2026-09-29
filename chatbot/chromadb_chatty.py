@@ -29,6 +29,7 @@ from rag_common import (
     build_ollama_client,
     detect_catalog_intent,
     embed_text,
+    ensure_model_loaded,
     safe_error_message,
     validate_message,
     with_retries,
@@ -44,6 +45,20 @@ logger = logging.getLogger(__name__)
 class ChromaChat:
     def __init__(self):
         self.ollama_client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
+        # Prewarm both models (keep_alive=-1 keeps them resident forever)
+        # so no user request pays a cold load. /api/ps is checked first,
+        # so an already-running model is never touched or reloaded.
+        ensure_model_loaded(
+            self.ollama_client,
+            OLLAMA_CONFIG["chat_model"],
+            keep_alive=OLLAMA_CONFIG["keep_alive"],
+            num_ctx=OLLAMA_CONFIG["num_ctx"],
+        )
+        ensure_model_loaded(
+            self.ollama_client,
+            OLLAMA_CONFIG["embedding_model"],
+            keep_alive=OLLAMA_CONFIG["keep_alive"],
+        )
         self.chroma_client = chromadb.PersistentClient(path=CHROMA_CONFIG["db_path"])
         self._collection_lock = threading.Lock()
         self._collection = self.chroma_client.get_collection(name=CHROMA_CONFIG["collection"])
@@ -130,7 +145,12 @@ class ChromaChat:
     def retrieve_context(self, query: str) -> List[Tuple[str, Optional[Dict]]]:
         """Retrieve the most relevant (chunk, metadata) pairs from ChromaDB."""
         query_embedding = with_retries(
-            lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
+            lambda: embed_text(
+                self.ollama_client,
+                query,
+                OLLAMA_CONFIG["embedding_model"],
+                keep_alive=OLLAMA_CONFIG["keep_alive"],
+            ),
             attempts=OLLAMA_CONFIG["retry_attempts"],
         )
         results = self.collection.query(
@@ -212,7 +232,8 @@ class ChromaChat:
 
         stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
-            options={"num_ctx": CHAT_CONFIG["max_context_length"]},
+            options={"num_ctx": OLLAMA_CONFIG["num_ctx"]},
+            keep_alive=OLLAMA_CONFIG["keep_alive"],
             messages=messages,
             stream=True,
         )

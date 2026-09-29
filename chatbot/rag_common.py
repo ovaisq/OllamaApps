@@ -50,6 +50,99 @@ def build_ollama_client(host: str, timeout: float) -> Any:
     )
 
 
+def is_model_loaded(client: Any, model: str, min_ctx: Optional[int] = None) -> Optional[bool]:
+    """Check whether `model` is already running on the Ollama server (/api/ps).
+
+    Args:
+        client: An ollama.Client instance.
+        model: Model name as configured, to match against running models.
+        min_ctx: If set, a running instance only counts as loaded when it
+            carries at least this many context tokens -- one loaded with a
+            smaller window has to be reloaded to serve the configured one.
+
+    Returns:
+        True if the model is running with a sufficient context window,
+        False if it definitively isn't, and None if the check itself
+        failed -- callers must treat "unknown" as "don't touch anything",
+        since a blind load request could reload an already-good instance.
+    """
+    try:
+        running = client.ps().models
+    except Exception:
+        logger.warning("Could not list running models on the Ollama server", exc_info=True)
+        return None
+    for entry in running:
+        name = getattr(entry, "model", None) or getattr(entry, "name", "")
+        if name != model:
+            continue
+        if min_ctx is None:
+            return True
+        ctx = getattr(entry, "context_length", None)
+        if ctx is None:
+            # Server doesn't report the loaded window size; assume the
+            # running instance is fine rather than force a blind reload.
+            return True
+        if ctx >= min_ctx:
+            return True
+        logger.info(
+            "%s is running with a %s-token window but %s is configured; "
+            "it must be reloaded to serve the larger context",
+            model, ctx, min_ctx,
+        )
+        return False
+    return False
+
+
+def ensure_model_loaded(
+    client: Any, model: str, keep_alive: float = -1, num_ctx: Optional[int] = None
+) -> bool:
+    """Load `model` on the Ollama server unless it is already running there.
+
+    Sends a load-only request (no prompt), so Ollama loads the model and
+    returns immediately; keep_alive decides how long it stays resident.
+    Checking /api/ps first saves the load round trip and, more
+    importantly, avoids touching an already-running instance: a load
+    request with different options would force a full model reload.
+
+    Args:
+        client: An ollama.Client instance.
+        model: Model name to load.
+        keep_alive: Seconds the model stays loaded after the call
+            (-1 = keep it resident forever).
+        num_ctx: Context window to load the model with; None uses the
+            model's own default (correct for embedding models, whose
+            window must not be inflated to the chat model's size).
+
+    Returns:
+        True if a load was issued, False if it was skipped (already
+        running, the running-state check failed, or the load failed).
+        Never raises -- prewarming must not take the app down.
+    """
+    loaded = is_model_loaded(client, model, min_ctx=num_ctx)
+    if loaded is None:
+        # Can't tell what's running -- never issue a blind load request:
+        # it could reload (and momentarily stop) an already-good instance.
+        logger.warning("Not preloading %s: the Ollama server's running-model list is unavailable", model)
+        return False
+    if loaded:
+        logger.info("%s is already loaded; skipping preload", model)
+        return False
+    try:
+        client.generate(
+            model=model,
+            keep_alive=keep_alive,
+            options={"num_ctx": num_ctx} if num_ctx else None,
+        )
+        logger.info("Preloaded %s (num_ctx=%s, keep_alive=%s)", model, num_ctx, keep_alive)
+        return True
+    except Exception:
+        logger.warning(
+            "Preloading %s failed; the first request will pay the cold-load cost",
+            model, exc_info=True,
+        )
+        return False
+
+
 def load_env_file(env_path: Path = None) -> None:
     """Load KEY=VALUE pairs from a .env file into os.environ (existing env
     vars take precedence). Mirrors the no-dependency loader already used in
@@ -93,11 +186,22 @@ def create_chunks(text: str, chunk_size: int = 800, chunk_overlap: int = 100) ->
     return splitter.split_text(text)
 
 
-def embed_text(client: Any, text: str, model: str, title: str = None) -> List[float]:
-    """Generate an embedding for a chunk of text (optionally titled) via Ollama."""
+def embed_text(
+    client: Any,
+    text: str,
+    model: str,
+    title: str = None,
+    keep_alive: Optional[float] = None,
+) -> List[float]:
+    """Generate an embedding for a chunk of text (optionally titled) via Ollama.
+
+    keep_alive (None = server default, -1 = keep the model loaded forever)
+    is passed through so an embed call can't silently reset the model's
+    unload timer and evict a keep-forever instance.
+    """
     enriched = f"Title: {title}\nContent: {text}" if title else text
     enriched = normalize_text(enriched)
-    return client.embeddings(model=model, prompt=enriched)["embedding"]
+    return client.embeddings(model=model, prompt=enriched, keep_alive=keep_alive)["embedding"]
 
 
 def format_source_label(metadata: Optional[Dict[str, Any]]) -> str:

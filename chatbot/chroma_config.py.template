@@ -14,6 +14,14 @@ OLLAMA_CONFIG = {
     # streamed) chat call since they share one client.
     'timeout': float(os.getenv('OLLAMA_TIMEOUT', 300)),
     'retry_attempts': int(os.getenv('OLLAMA_RETRY_ATTEMPTS', 3)),
+    # Context window the chat model is loaded with. Must match what the
+    # model is already running with on the server -- any other num_ctx
+    # forces a full model reload on the first chat call.
+    'num_ctx': int(os.getenv('LLM_NUM_CTX', 262144)),
+    # Sent with every chat/embedding call so app requests never reset the
+    # models' unload timer to the server's 5-minute default. -1 keeps a
+    # model loaded forever; any other value is seconds.
+    'keep_alive': int(os.getenv('OLLAMA_KEEP_ALIVE_SECONDS', -1)),
 }
 
 # ChromaDB configuration
@@ -32,7 +40,6 @@ INDEXER_CONFIG = {
 CHAT_CONFIG = {
     'top_k': int(os.getenv('TOP_K', 3)),
     'reload_interval': int(os.getenv('RELOAD_INTERVAL', 30)),
-    'max_context_length': int(os.getenv('MAX_CONTEXT_LENGTH', 8192)),
     'max_message_length': int(os.getenv('MAX_MESSAGE_LENGTH', 4000)),
     # Chroma L2 distance above which a retrieved chunk is treated as "not
     # actually relevant" and dropped rather than fed to the model. Unset

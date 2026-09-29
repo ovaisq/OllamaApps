@@ -45,7 +45,10 @@ def index_text(text: str, source: str, collection, client, extra_metadata: dict 
         cid = chunk_hash(chunk)
         if cid not in existing_ids and cid not in unique_data:
             try:
-                embedding = embed_text(client, chunk, OLLAMA_CONFIG["embedding_model"], title=source)
+                embedding = embed_text(
+                    client, chunk, OLLAMA_CONFIG["embedding_model"],
+                    title=source, keep_alive=OLLAMA_CONFIG["keep_alive"],
+                )
             except ollama.ResponseError as e:
                 # e.g. "input length exceeds the context length" on a
                 # token-dense chunk (CSV rows tokenize heavier than prose).

@@ -64,6 +64,66 @@ def test_respond_rejects_oversized_message_without_calling_llm(chat):
     assert "exceeds" in outputs[-1][0][-1]["content"]
 
 
+def test_embedding_call_keeps_model_loaded(chat):
+    """Embedding calls must pass keep_alive=-1 too -- without it each call
+    resets the embedding model's unload timer to the server's 5-minute
+    default, evicting a keep-forever instance after 5 idle minutes."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
+
+    instance.retrieve_context("query")
+
+    assert ollama_client.embeddings.call_args.kwargs["keep_alive"] == -1
+
+
+def test_chat_uses_configured_context_window_and_keep_alive(chat):
+    """Chat must send the configured num_ctx -- a smaller window (the old
+    hardcoded 8192) forces a full reload of a model running with 256K --
+    and keep_alive=-1 so no request resets the unload timer."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
+    ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
+
+    list(instance.get_answer_stream("hello", [], MagicMock(is_set=lambda: False)))
+
+    kwargs = ollama_client.chat.call_args.kwargs
+    assert kwargs["options"]["num_ctx"] == chromadb_chatty.OLLAMA_CONFIG["num_ctx"]
+    assert kwargs["options"]["num_ctx"] == 262144
+    assert kwargs["keep_alive"] == -1
+
+
+def test_construction_prewarms_only_models_not_already_running(tmp_path):
+    """Startup prewarm must check /api/ps first: an already-running model
+    with a sufficient context window is left untouched (a redundant load
+    request with different options would force a reload), while a
+    not-running one is preloaded with keep_alive so it stays resident."""
+    mock_ollama = MagicMock()
+    chat_running = MagicMock(
+        model=chromadb_chatty.OLLAMA_CONFIG["chat_model"],
+        context_length=chromadb_chatty.OLLAMA_CONFIG["num_ctx"],
+    )
+    mock_ollama.ps.return_value.models = [chat_running]
+
+    with patch("chromadb_chatty.build_ollama_client", return_value=mock_ollama), \
+         patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls, \
+         patch(
+            "chromadb_chatty.CHROMA_CONFIG",
+            {**chromadb_chatty.CHROMA_CONFIG, "db_path": str(tmp_path / "chroma_db")},
+         ):
+        mock_chroma_cls.return_value.get_collection.return_value = MagicMock()
+        instance = chromadb_chatty.ChromaChat()
+    instance._stop_reload.set()
+
+    loaded_models = [c.kwargs["model"] for c in mock_ollama.generate.call_args_list]
+    assert loaded_models == [chromadb_chatty.OLLAMA_CONFIG["embedding_model"]]
+    load_call = mock_ollama.generate.call_args.kwargs
+    assert load_call["keep_alive"] == chromadb_chatty.OLLAMA_CONFIG["keep_alive"]
+    # Embedding model gets its own default window, not the chat model's.
+    assert load_call["options"] is None
+
+
 def test_respond_hides_internal_error_details_from_user(chat):
     instance, _collection, ollama_client = chat
     ollama_client.embeddings.side_effect = ConnectionError("db-password=hunter2 leaked")

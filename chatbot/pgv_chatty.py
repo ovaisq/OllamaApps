@@ -27,6 +27,7 @@ from rag_common import (
     build_ollama_client,
     detect_catalog_intent,
     embed_text,
+    ensure_model_loaded,
     safe_error_message,
     validate_message,
     with_retries,
@@ -51,6 +52,20 @@ class PGVectorChat:
         finally:
             self.pool.putconn(bootstrap_conn)
         self.ollama_client = build_ollama_client(OLLAMA_CONFIG["host"], OLLAMA_CONFIG["timeout"])
+        # Prewarm both models (keep_alive=-1 keeps them resident forever)
+        # so no user request pays a cold load. /api/ps is checked first,
+        # so an already-running model is never touched or reloaded.
+        ensure_model_loaded(
+            self.ollama_client,
+            OLLAMA_CONFIG["chat_model"],
+            keep_alive=OLLAMA_CONFIG["keep_alive"],
+            num_ctx=OLLAMA_CONFIG["num_ctx"],
+        )
+        ensure_model_loaded(
+            self.ollama_client,
+            OLLAMA_CONFIG["embedding_model"],
+            keep_alive=OLLAMA_CONFIG["keep_alive"],
+        )
         self._ensure_chat_history_schema()
         with self._connection() as conn:
             ensure_markdown_chunks_schema(
@@ -151,7 +166,12 @@ class PGVectorChat:
         nearest-neighbor search.
         """
         query_embedding = with_retries(
-            lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
+            lambda: embed_text(
+                self.ollama_client,
+                query,
+                OLLAMA_CONFIG["embedding_model"],
+                keep_alive=OLLAMA_CONFIG["keep_alive"],
+            ),
             attempts=OLLAMA_CONFIG["retry_attempts"],
         )
         with self._connection() as conn:
@@ -241,7 +261,8 @@ class PGVectorChat:
             model=OLLAMA_CONFIG["chat_model"],
             messages=messages,
             stream=True,
-            options={"num_ctx": CHAT_CONFIG["max_context_length"]},
+            options={"num_ctx": OLLAMA_CONFIG["num_ctx"]},
+            keep_alive=OLLAMA_CONFIG["keep_alive"],
         )
 
         full_response = ""

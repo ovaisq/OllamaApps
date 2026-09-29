@@ -28,8 +28,11 @@ def make_fake_pool(fetchall_return=None):
 @pytest.fixture
 def chat():
     pool, conn, cursor = make_fake_pool()
+    # build_ollama_client is patched (like the chroma fixture) so __init__'s
+    # model prewarm hits a mock instead of the real Ollama server.
     with patch("pgv_chatty.ThreadedConnectionPool", return_value=pool), \
-         patch("pgv_chatty.register_vector"):
+         patch("pgv_chatty.register_vector"), \
+         patch("pgv_chatty.build_ollama_client", return_value=MagicMock()):
         instance = pgv_chatty.PGVectorChat()
     instance.ollama_client = MagicMock()
     return instance, cursor
@@ -82,6 +85,60 @@ def test_get_context_chunks_does_not_order_by_length(chat):
 
     sql = cursor.execute.call_args.args[0]
     assert "LENGTH(chunk)" not in sql
+
+
+def test_embedding_call_keeps_model_loaded(chat):
+    """Embedding calls must pass keep_alive=-1 too -- without it each call
+    resets the embedding model's unload timer to the server's 5-minute
+    default, evicting a keep-forever instance after 5 idle minutes."""
+    instance, cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+
+    instance.get_context_chunks("query")
+
+    assert instance.ollama_client.embeddings.call_args.kwargs["keep_alive"] == -1
+
+
+def test_chat_uses_configured_context_window_and_keep_alive(chat):
+    """Chat must send the configured num_ctx -- a smaller window (the old
+    hardcoded 8192) forces a full reload of a model running with 256K --
+    and keep_alive=-1 so no request resets the unload timer."""
+    instance, cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    instance.ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
+
+    list(instance.get_answer_stream("hello", [], MagicMock(is_set=lambda: False)))
+
+    kwargs = instance.ollama_client.chat.call_args.kwargs
+    assert kwargs["options"]["num_ctx"] == pgv_chatty.OLLAMA_CONFIG["num_ctx"]
+    assert kwargs["options"]["num_ctx"] == 262144
+    assert kwargs["keep_alive"] == -1
+
+
+def test_construction_prewarms_only_models_not_already_running():
+    """Startup prewarm must check /api/ps first: an already-running model
+    with a sufficient context window is left untouched (a redundant load
+    request with different options would force a reload), while a
+    not-running one is preloaded with keep_alive so it stays resident."""
+    pool, conn, cursor = make_fake_pool()
+    mock_ollama = MagicMock()
+    chat_running = MagicMock(
+        model=pgv_chatty.OLLAMA_CONFIG["chat_model"],
+        context_length=pgv_chatty.OLLAMA_CONFIG["num_ctx"],
+    )
+    mock_ollama.ps.return_value.models = [chat_running]
+
+    with patch("pgv_chatty.ThreadedConnectionPool", return_value=pool), \
+         patch("pgv_chatty.register_vector"), \
+         patch("pgv_chatty.build_ollama_client", return_value=mock_ollama):
+        pgv_chatty.PGVectorChat()
+
+    loaded_models = [c.kwargs["model"] for c in mock_ollama.generate.call_args_list]
+    assert loaded_models == [pgv_chatty.OLLAMA_CONFIG["embedding_model"]]
+    load_call = mock_ollama.generate.call_args.kwargs
+    assert load_call["keep_alive"] == pgv_chatty.OLLAMA_CONFIG["keep_alive"]
+    # Embedding model gets its own default window, not the chat model's.
+    assert load_call["options"] is None
 
 
 def test_respond_rejects_oversized_message_without_calling_llm(chat):
