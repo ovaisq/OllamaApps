@@ -12,6 +12,8 @@ import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pgvector.psycopg2 import register_vector
 
+from admin_ui import build_admin_tab
+from auth_routes import register_routes as register_auth_routes
 from pgv_config import CHAT_CONFIG, DB_CONFIG, DB_POOL_CONFIG, OLLAMA_CONFIG
 from rag_common import embed_text, safe_error_message, validate_message, with_retries
 
@@ -177,6 +179,23 @@ Answer:
         stop_event.set()
         return (history, "", state)
 
+    def count_chunks(self) -> int:
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM markdown_chunks")
+                return cursor.fetchone()[0]
+
+    def index_text(self, text: str, source: str) -> int:
+        from pgv_indexer import index_text
+
+        with self._connection() as conn:
+            return index_text(text, source, conn)
+
+    def sync_drive(self) -> int:
+        from gdrive_indexer import get_access_token, run_pgvector_backend
+
+        return run_pgvector_backend(get_access_token())
+
 
 def main():
     """Main function for chat interface."""
@@ -191,16 +210,19 @@ def main():
     ) as chatty:
         gr.Markdown("# Markdown Document Chatbot")
 
-        chatbot = gr.Chatbot(label="Chat History")
-        msg = gr.Textbox(label="Your Message")
-        stop_btn = gr.Button("Stop Response")
-        state = gr.State(value={})
+        with gr.Tab("Chat"):
+            chatbot = gr.Chatbot(label="Chat History")
+            msg = gr.Textbox(label="Your Message")
+            stop_btn = gr.Button("Stop Response")
+            state = gr.State(value={})
 
-        msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
-        stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+            msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
+            stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
 
-        clear_btn = gr.Button("Clear History")
-        clear_btn.click(lambda: ([], "", {}), None, [chatbot, msg, state])
+            clear_btn = gr.Button("Clear History")
+            clear_btn.click(lambda: ([], "", {}), None, [chatbot, msg, state])
+
+        build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
 
     app = fastapi.FastAPI()
 
@@ -212,11 +234,9 @@ def main():
             {"status": "ok" if ok else "unavailable"}, status_code=status_code
         )
 
-    try:
-        from gdrive_oauth_routes import register_routes as register_gdrive_routes
-        register_gdrive_routes(app)
-    except ImportError:
-        logger.info("gdrive_config.py not present; Google Drive OAuth routes disabled")
+    # Gates every other route (including the Gradio UI mounted below) behind
+    # Google sign-in restricted to AUTH_CONFIG['allowed_emails'].
+    register_auth_routes(app)
 
     gr.mount_gradio_app(app, chatty.queue(), path="/")
 

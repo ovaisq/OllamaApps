@@ -3,10 +3,10 @@
 markdown chatbot's vector store.
 
 One-time setup: with the chatbot app running (pgv_chatty.py or
-chromadb_chatty.py, which mount the routes in gdrive_oauth_routes.py), visit
-GET /connect-drive in a browser to grant Drive read access. That persists a
-refresh token to gdrive_config.DRIVE_CONFIG['token_store_path']. Then run this
-indexer as a cron/manual job, same as pgv_indexer.py/chromadb_indexer.py.
+chromadb_chatty.py, which mount the routes in auth_routes.py), log in as an
+allowlisted account at GET /login. That grants Drive read access and persists
+a refresh token to gdrive_config.DRIVE_CONFIG['token_store_path']. Then run
+this indexer as a cron/manual job, same as pgv_indexer.py/chromadb_indexer.py.
 """
 import argparse
 import logging

@@ -39,13 +39,36 @@ Postgres. `.env` is required — `docker compose` looks for it in the same
 directory as `docker-compose.yml` and refuses to start without the vars it
 references (`DB_PASSWORD` in particular).
 
+## Logging in / Admin tab
+
+The whole app (chat + admin) is gated behind Google sign-in — nothing is
+reachable except `GET /health` until you log in with an allowlisted account:
+
+1. Set `SESSION_SECRET` (e.g. `openssl rand -hex 32`) and `ALLOWED_EMAILS`
+   (comma-separated Google account emails) in `.env`. Empty `ALLOWED_EMAILS`
+   means nobody can log in — fails closed, not open.
+2. Visit `https://<your-host>:7860/` — you'll be redirected to `/login`, then
+   to Google's consent screen (identity + Drive readonly, one login covers
+   both).
+3. On success you land back on the chat UI with a session cookie (7-day
+   default, `SESSION_MAX_AGE_SECONDS`). `/logout` clears it.
+
+Once logged in, the **Admin** tab lets you:
+* Upload a `.md`/`.txt`/`.pdf` file to index immediately (no CLI/SSH needed).
+* Click "Sync Google Drive now" to pull new/changed Drive content on demand.
+* See total indexed chunk count.
+
+`gdrive_indexer.py` (the CLI/cron path) uses the same stored refresh token,
+so logging in once as an allowlisted account also unlocks scheduled syncs.
+
 ## Production notes
 
 * Retrieval uses real pgvector/Chroma nearest-neighbor search over query embeddings (not chunk length).
 * `pgv_chatty.py` uses a pooled, health-checked DB connection (`psycopg2.pool.ThreadedConnectionPool`).
 * Both chat apps validate message length, retry transient Ollama failures with backoff, and never leak internal exception details to end users (a correlation `error id` is logged server-side instead).
-* Both apps expose `GET /health` (200/503) for k8s liveness/readiness probes, alongside the Gradio UI on the same port.
+* Both apps expose `GET /health` (200/503) for k8s liveness/readiness probes, alongside the Gradio UI on the same port -- every other route requires a valid session.
 * The "Stop Response" button only stops the requesting browser session's stream, not every concurrent user's.
+* OAuth `state` is verified one-shot on `/oauth2callback` (no replay), and a login from a non-allowlisted Google account is rejected without ever touching the stored Drive refresh token.
 
 ## Tests
 

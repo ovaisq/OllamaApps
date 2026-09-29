@@ -12,9 +12,6 @@ GOOGLE_CONFIG = {
     'redirect_uri': os.getenv(
         'GOOGLE_REDIRECT_URI', 'https://chatty.ifthenelse.net:7860/oauth2callback'
     ),
-    # Required to hit GET /connect-drive; without it, the route refuses every
-    # request (see gdrive_oauth_routes.py). Generate with e.g. `openssl rand -hex 32`.
-    'admin_token': os.getenv('GDRIVE_ADMIN_TOKEN', ''),
 }
 
 DRIVE_CONFIG = {
@@ -23,4 +20,23 @@ DRIVE_CONFIG = {
     'folder_id': os.getenv('GDRIVE_FOLDER_ID', ''),
     # Where the long-lived refresh token is persisted between runs.
     'token_store_path': os.getenv('GDRIVE_TOKEN_STORE', './gdrive_token.json'),
+}
+
+# App login: gates the whole chatbot UI (see auth_routes.py). The same Google
+# sign-in also authorizes Drive access, so there's one login for both.
+_session_secret = os.getenv('SESSION_SECRET', '')
+if not _session_secret:
+    raise RuntimeError(
+        "SESSION_SECRET environment variable is required (used to sign session "
+        "cookies). Generate one with: openssl rand -hex 32"
+    )
+
+AUTH_CONFIG = {
+    'session_secret': _session_secret,
+    'session_max_age_seconds': int(os.getenv('SESSION_MAX_AGE_SECONDS', 60 * 60 * 24 * 7)),
+    # Comma-separated list of Google account emails allowed to log in. Nobody
+    # can authenticate at all if this is empty -- fails closed, not open.
+    'allowed_emails': {
+        e.strip().lower() for e in os.getenv('ALLOWED_EMAILS', '').split(',') if e.strip()
+    },
 }

@@ -15,6 +15,8 @@ import fastapi
 import gradio as gr
 import ollama
 
+from admin_ui import build_admin_tab
+from auth_routes import register_routes as register_auth_routes
 from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
 from rag_common import embed_text, safe_error_message, validate_message, with_retries
 
@@ -174,19 +176,36 @@ Answer:
         stop_event.set()
         return (chat_history, "", state)
 
+    def count_chunks(self) -> int:
+        return self.collection.count()
+
+    def index_text(self, text: str, source: str) -> int:
+        from chromadb_indexer import index_text
+
+        return index_text(text, source, self.collection, self.ollama_client)
+
+    def sync_drive(self) -> int:
+        from gdrive_indexer import get_access_token, run_chromadb_backend
+
+        return run_chromadb_backend(get_access_token())
+
 
 def main():
     chat = ChromaChat()
 
     with gr.Blocks(title="Markdown Chatbot", css="footer {display: none !important;}") as blocks:
         gr.Markdown("# ChromaDB: Markdown Chatbot")
-        chatbot = gr.Chatbot()
-        msg = gr.Textbox(label="Ask about the README")
-        stop_btn = gr.Button("Stop Chat")
-        state = gr.State(value={})
 
-        msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
-        stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+        with gr.Tab("Chat"):
+            chatbot = gr.Chatbot()
+            msg = gr.Textbox(label="Ask about the README")
+            stop_btn = gr.Button("Stop Chat")
+            state = gr.State(value={})
+
+            msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state], queue=True)
+            stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state])
+
+        build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
 
     app = fastapi.FastAPI()
 
@@ -198,11 +217,9 @@ def main():
             {"status": "ok" if ok else "unavailable"}, status_code=status_code
         )
 
-    try:
-        from gdrive_oauth_routes import register_routes as register_gdrive_routes
-        register_gdrive_routes(app)
-    except ImportError:
-        logger.info("gdrive_config.py not present; Google Drive OAuth routes disabled")
+    # Gates every other route (including the Gradio UI mounted below) behind
+    # Google sign-in restricted to AUTH_CONFIG['allowed_emails'].
+    register_auth_routes(app)
 
     gr.mount_gradio_app(app, blocks.queue(), path="/")
 

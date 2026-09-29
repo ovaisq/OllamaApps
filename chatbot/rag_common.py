@@ -1,12 +1,13 @@
 """Shared helpers used by both the pgvector and ChromaDB chatbot variants."""
 import hashlib
+import io
 import logging
 import os
 import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, List, Tuple, Type
+from typing import Any, Callable, List, Optional, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,33 @@ def embed_text(client: Any, text: str, model: str, title: str = None) -> List[fl
     enriched = f"Title: {title}\nContent: {text}" if title else text
     enriched = normalize_text(enriched)
     return client.embeddings(model=model, prompt=enriched)["embedding"]
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> Optional[str]:
+    """Extract text from PDF bytes, or None if extraction fails/empty."""
+    if not pdf_bytes:
+        return None
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception:
+        logger.exception("Failed to extract text from PDF")
+        return None
+
+
+def extract_text_from_upload(file_path: str) -> Optional[str]:
+    """Extract plain text from a locally-uploaded .md/.txt/.pdf file, or
+    None if the extension isn't supported.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in (".md", ".txt"):
+        return read_markdown(file_path)
+    if ext == ".pdf":
+        with open(file_path, "rb") as f:
+            return extract_pdf_text(f.read())
+    return None
 
 
 def validate_message(message: str, max_length: int) -> str:

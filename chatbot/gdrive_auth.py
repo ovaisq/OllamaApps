@@ -12,14 +12,19 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+IDENTITY_SCOPE = "openid email profile"
+# One login covers both app sign-in and Drive authorization.
+LOGIN_SCOPE = f"{IDENTITY_SCOPE} {DRIVE_READONLY_SCOPE}"
 
 
-def get_google_auth_url(client_id: str, redirect_uri: str, state: str = None) -> str:
+def get_google_auth_url(
+    client_id: str, redirect_uri: str, state: str = None, scope: str = LOGIN_SCOPE
+) -> str:
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": DRIVE_READONLY_SCOPE,
+        "scope": scope,
         "access_type": "offline",
         "prompt": "consent",
         "state": state or secrets.token_urlsafe(32),
@@ -45,6 +50,19 @@ async def exchange_code_for_tokens(
     if resp.status_code != 200:
         logger.error("Google code exchange failed: %s %s", resp.status_code, resp.text[:200])
         raise RuntimeError("Failed to exchange Google authorization code")
+    return resp.json()
+
+
+async def fetch_userinfo(access_token: str) -> dict:
+    """Return {'email': ..., 'name': ..., ...} for the account that just logged in."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code != 200:
+        logger.error("Google userinfo fetch failed: %s %s", resp.status_code, resp.text[:200])
+        raise RuntimeError("Failed to fetch Google account info")
     return resp.json()
 
 

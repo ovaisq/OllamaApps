@@ -2,11 +2,12 @@
 Google Docs, .md/.txt files, and PDFs. No google-api-python-client dependency
 (matches the httpx-against-raw-endpoints pattern used elsewhere in this repo).
 """
-import io
 import logging
 from typing import Dict, Iterator, Optional
 
 import httpx
+
+from rag_common import extract_pdf_text
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def fetch_file_text(access_token: str, file_id: str, mime_type: str) -> Optional
     if mime_type in ("text/plain", "text/markdown"):
         return _download_raw(access_token, file_id).decode("utf-8", errors="replace")
     if mime_type == "application/pdf":
-        return _extract_pdf_text(_download_raw(access_token, file_id))
+        return extract_pdf_text(_download_raw(access_token, file_id))
     return None
 
 
@@ -92,16 +93,3 @@ def _download_raw(access_token: str, file_id: str) -> bytes:
         logger.warning("Download %s failed: %s %s", file_id, resp.status_code, resp.text[:200])
         return b""
     return resp.content
-
-
-def _extract_pdf_text(pdf_bytes: bytes) -> Optional[str]:
-    if not pdf_bytes:
-        return None
-    from pypdf import PdfReader
-
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception:
-        logger.exception("Failed to extract text from PDF")
-        return None

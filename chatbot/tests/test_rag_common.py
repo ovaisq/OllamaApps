@@ -4,6 +4,7 @@ import pytest
 
 from rag_common import (
     chunk_hash,
+    extract_text_from_upload,
     normalize_text,
     safe_error_message,
     validate_message,
@@ -62,3 +63,21 @@ def test_safe_error_message_never_leaks_exception_text():
     assert "hunter2" not in msg
     assert "error id" in msg
     logger.error.assert_called_once()
+
+
+def test_extract_text_from_upload_reads_markdown(tmp_path):
+    f = tmp_path / "notes.md"
+    f.write_text("# hello")
+    assert extract_text_from_upload(str(f)) == "# hello"
+
+
+def test_extract_text_from_upload_reads_txt(tmp_path):
+    f = tmp_path / "notes.txt"
+    f.write_text("plain text")
+    assert extract_text_from_upload(str(f)) == "plain text"
+
+
+def test_extract_text_from_upload_returns_none_for_unsupported_extension(tmp_path):
+    f = tmp_path / "notes.docx"
+    f.write_text("hi")
+    assert extract_text_from_upload(str(f)) is None
