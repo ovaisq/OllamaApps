@@ -1,6 +1,7 @@
-"""Shared 'Admin' Gradio tab: upload-to-index, Google Drive sync, and index
-stats. Built once here and used by both pgv_chatty.py and chromadb_chatty.py
-so the two backends don't duplicate this UI wiring.
+"""Shared 'Library' Gradio tab (formerly 'Admin'): upload-to-index, Google
+Drive sync, teach-a-correction (with recent-dislike prefill), and live
+index stats. Built once here and used by both pgv_chatty.py and
+chromadb_chatty.py so the two backends don't duplicate this UI wiring.
 
 The handler functions below are plain, dependency-injected callables (not
 closures over app internals) so they can be unit tested without spinning up
@@ -12,6 +13,12 @@ import os
 import gradio as gr
 
 from rag_common import extract_text_from_upload, safe_error_message
+from ui_common import (
+    INDEX_CHIP_INTERVAL_SECONDS,
+    feedback_prefill,
+    format_index_summary,
+    refresh_feedback_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,20 +148,66 @@ def teach_correction(question: str, answer: str, index_text_fn, request=None):
     )
 
 
-def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
-    """Adds an 'Admin' tab to the enclosing gr.Blocks context."""
-    with gr.Tab("Admin"):
-        gr.Markdown("## Add content")
-        # Two upload paths: a multi-file picker (restricted to supported
-        # types) and a folder picker (browser sends every file inside;
-        # unsupported types are skipped server-side and named in the
-        # summary).
-        upload = gr.File(
-            label="Upload files (.md, .txt, .pdf, .xlsx)",
-            file_count="multiple",
-            file_types=[".md", ".txt", ".pdf", ".xlsx"],
+def build_admin_tab(index_text_fn, summary_fn, drive_sync_fn,
+                    feedback_rows_fn=None, blocks: "gr.Blocks" = None) -> None:
+    """Adds the 'Library' tab to the enclosing gr.Blocks context.
+
+    summary_fn(force=False) -> {"chunks", "documents", "top_sources",
+    "last_sync"} dict (see the chat classes' index_summary).
+    feedback_rows_fn(email) -> recent disliked answers for the
+    correction prefill (both backends implement it; None disables the bit).
+
+    The old tab was one long single-column scroll (uploads, Drive, teach,
+    stats); now it's a two-row card grid so a laptop screen shows all of
+    it, and the index card refreshes itself instead of sitting stale until
+    someone notices the 'Refresh stats' button.
+    """
+    with gr.Tab("Library"):
+        gr.Markdown(
+            "Add files or a folder — **.md, .txt, .pdf, .xlsx** get indexed; "
+            "anything else is skipped and named in the status below."
         )
-        upload_status = gr.Markdown()
+        # Row 1: content in, Drive synced, all visible at a glance.
+        with gr.Row(equal_height=False):
+            with gr.Column():
+                gr.Markdown("### Add files")
+                upload = gr.File(
+                    label="Upload files (.md, .txt, .pdf, .xlsx)",
+                    file_count="multiple",
+                    file_types=[".md", ".txt", ".pdf", ".xlsx"],
+                )
+                upload_status = gr.Markdown()
+            with gr.Column():
+                gr.Markdown("### Add a folder")
+                folder_upload = gr.File(
+                    label="Upload a folder",
+                    file_count="directory",
+                )
+                folder_upload_status = gr.Markdown()
+            with gr.Column():
+                gr.Markdown("### Google Drive")
+                drive_status = gr.Markdown()
+                sync_btn = gr.Button("Sync Google Drive now", variant="primary")
+
+        with gr.Row(equal_height=False):
+            with gr.Column():
+                gr.Markdown(
+                    "### Teach Chatty a correction\n"
+                    "Did it get something wrong? Tell it the right answer here and it "
+                    "will use the correction for similar questions from now on."
+                )
+                wrong_question = gr.Textbox(label="A question it answered wrong")
+                correct_answer = gr.Textbox(label="The correct answer", lines=3)
+                teach_status = gr.Markdown()
+                teach_btn = gr.Button("Teach this correction")
+
+            with gr.Column():
+                gr.Markdown("### Index")
+                # No backend call at build time: the load event below paints
+                # it on page load, the timer keeps it live, the button forces
+                # a fresh read.
+                stats = gr.Markdown("_Index stats load on page open._")
+                refresh_btn = gr.Button("Refresh stats", size="sm")
 
         def _index_uploads(files):
             # Generator handlers stream every yield to the status line.
@@ -164,19 +217,10 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
             _index_uploads, upload, upload_status,
             queue=True, show_progress="full", show_progress_on=[upload_status],
         )
-        folder_upload = gr.File(
-            label="Upload a folder (its .md/.txt/.pdf/.xlsx files are indexed)",
-            file_count="directory",
-        )
-        folder_upload_status = gr.Markdown()
         folder_upload.upload(
             _index_uploads, folder_upload, folder_upload_status,
             queue=True, show_progress="full", show_progress_on=[folder_upload_status],
         )
-
-        gr.Markdown("## Google Drive")
-        drive_status = gr.Markdown()
-        sync_btn = gr.Button("Sync Google Drive now")
 
         def _sync_drive():
             yield from sync_drive_now(drive_sync_fn)
@@ -184,24 +228,44 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
         sync_btn.click(_sync_drive, None, drive_status,
                        queue=True, show_progress="full", show_progress_on=[drive_status])
 
-        gr.Markdown(
-            "## Teach Chatty a correction\n"
-            "Did it get something wrong? Tell it the right answer here and it "
-            "will use the correction for similar questions from now on."
-        )
-        wrong_question = gr.Textbox(label="A question it answered wrong")
-        correct_answer = gr.Textbox(label="The correct answer", lines=3)
-        teach_status = gr.Markdown()
-        teach_btn = gr.Button("Teach this correction")
-
         def _teach(question, answer, request: gr.Request = None):
             yield from teach_correction(question, answer, index_text_fn, request)
 
         teach_btn.click(_teach, [wrong_question, correct_answer], teach_status,
                         queue=True, show_progress="full", show_progress_on=[teach_status])
 
-        gr.Markdown("## Index status")
-        stats = gr.Markdown()
-        refresh_btn = gr.Button("Refresh stats")
-        refresh_btn.click(lambda: get_index_stats(count_fn), None, stats,
+        # Index card: live (timer + first paint on load) and manually
+        # refreshable (force=True busts the sources cache).
+        def _stats(force: bool = False) -> str:
+            return format_index_summary(summary_fn(force=force))
+
+        refresh_btn.click(lambda: _stats(force=True), None, stats,
                           show_progress="hidden")
+        if blocks is not None:
+            blocks.load(lambda: _stats(), None, stats, show_progress="hidden")
+            gr.Timer(INDEX_CHIP_INTERVAL_SECONDS).tick(lambda: _stats(), None, stats)
+
+        # Recent-dislike review: pick a mis-answer, its question prefills
+        # the correction form above, the user supplies the right answer.
+        if feedback_rows_fn is not None:
+            gr.Markdown(
+                "### Recent mis-answers\n"
+                "From your 👎 feedback — pick one to start teaching a correction."
+            )
+            feedback_dd = gr.Dropdown(
+                label="A mis-answer to fix", choices=[], interactive=True
+            )
+            feedback_preview = gr.Markdown()
+            fb_state = gr.State([])
+
+            def _refresh_feedback(request: gr.Request = None):
+                return refresh_feedback_rows(feedback_rows_fn, request)
+
+            fb_outputs = [feedback_dd, feedback_preview, fb_state]
+            if blocks is not None:
+                blocks.load(_refresh_feedback, None, fb_outputs, show_progress="hidden")
+            feedback_refresh_btn = gr.Button("Refresh list", size="sm")
+            feedback_refresh_btn.click(_refresh_feedback, None, fb_outputs,
+                                       show_progress="hidden")
+            feedback_dd.select(feedback_prefill, [feedback_dd, fb_state],
+                               [wrong_question], show_progress="hidden")

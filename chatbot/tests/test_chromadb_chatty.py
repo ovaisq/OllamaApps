@@ -136,13 +136,17 @@ def test_sync_drive_rejects_concurrent_triggers(chat):
     instance._sync_gate.finish()
 
 
-def test_sync_drive_runs_when_idle(chat):
+def test_sync_drive_runs_when_idle_and_records_the_sync_time(chat):
     instance, _collection, _ollama_client = chat
     with patch("gdrive_indexer.get_access_token", return_value="token"), \
-         patch("gdrive_indexer.run_chromadb_backend", return_value=42) as run:
+         patch("gdrive_indexer.run_chromadb_backend", return_value=42) as run, \
+         patch("chromadb_chatty.record_drive_sync_timestamp") as record:
         assert instance.sync_drive() == 42
 
     run.assert_called_once_with("token")
+    # A successful sync stamps the 'Drive synced 2 h ago' timestamp;
+    # blocked syncs (-1 path, other test) and failures never do.
+    record.assert_called_once()
 
 
 def test_scroll_follows_output_only_while_user_is_at_bottom(chat):
@@ -432,6 +436,97 @@ def test_load_history_ui_returns_empty_for_unauthenticated_request(chat):
         assert instance.load_history_ui(MagicMock()) == []
 
 
+def test_load_history_ui_shows_welcome_for_new_user(chat):
+    """A signed-in user with no history gets the welcome message instead of
+    a blank window (display-only, never persisted)."""
+    instance, _collection, _ollama_client = chat
+    with patch("chromadb_chatty.get_email_from_request", return_value="user@example.com"):
+        history = instance.load_history_ui(MagicMock())
+
+    assert len(history) == 1
+    assert history[0]["role"] == "assistant"
+    assert "Chatty here" in history[0]["content"]
+
+
+def test_respond_appends_sources_footer_to_completed_answer(chat):
+    """A completed content-search answer shows which documents fed the
+    model -- the retrieval metadata used to be thrown away after building
+    the prompt."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {
+        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
+    }
+    ollama_client.chat.return_value = iter([{"message": {"content": "hi there"}}])
+
+    outputs = list(instance.respond("hello", [], {}))
+
+    final_content = outputs[-1][0][-1]["content"]
+    assert final_content.startswith("hi there")
+    assert "chatty-sources" in final_content
+    assert "doc.md" in final_content
+
+
+def test_respond_marks_a_user_stopped_answer(chat, monkeypatch):
+    """Stopping mid-stream keeps the partial text and appends a visible
+    Stopped marker -- not an error bubble, not frozen typing dots, and no
+    sources footer (the search was superseded)."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {
+        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
+    }
+
+    def fake_stream(messages, stop_event):
+        yield "partial answer"
+        stop_event.set()
+
+    monkeypatch.setattr(instance, "_stream_answer", fake_stream)
+
+    outputs = list(instance.respond("hello", [], {}))
+
+    final_content = outputs[-1][0][-1]["content"]
+    assert final_content.startswith("partial answer")
+    assert "chatty-stopped" in final_content
+    assert "chatty-sources" not in final_content
+
+
+def test_index_summary_counts_documents_and_top_sources(chat):
+    instance, collection, _ollama_client = chat
+    collection.get.return_value = {
+        "metadatas": [{"source": "a.md"}, {"source": "a.md"}, {"source": "b.pdf"}],
+    }
+    collection.count.return_value = 12
+
+    summary = instance.index_summary()
+
+    assert summary["chunks"] == 12
+    assert summary["documents"] == 2
+    assert summary["top_sources"] == [("a.md", 2), ("b.pdf", 1)]
+    assert summary["last_sync"] is None
+
+
+def test_load_feedback_returns_only_this_users_dislikes(chat):
+    """The Library tab's correction prefill lists dislikes only (likes are
+    fine, they're not things to correct)."""
+    instance, _collection, _ollama_client = chat
+    instance.record_feedback(
+        [{"role": "user", "content": "the question"},
+         {"role": "assistant", "content": "the wrong answer"}],
+        MagicMock(index=1, liked=False),
+    )
+    instance.record_feedback(
+        [{"role": "user", "content": "the good question"},
+         {"role": "assistant", "content": "right answer"}],
+        MagicMock(index=1, liked=True),
+    )
+
+    rows = instance.load_feedback("anonymous")
+
+    assert [r["question"] for r in rows] == ["the question"]
+    assert rows[0]["answer"] == "the wrong answer"
+
+
 def test_clear_chat_ui_clears_persisted_history_for_identified_user(chat):
     instance, _collection, _ollama_client = chat
     instance.save_message("user@example.com", "user", "hi")
@@ -459,4 +554,9 @@ def test_stop_chat_only_stops_its_own_session(chat):
     assert state_a["stop_event"].is_set()
 
     outputs = list(instance.respond("hello", [], {}))
-    assert outputs[-1][0][-1]["content"] == "hi there"
+    # Session a's stop state must not leak in (the full answer arrived);
+    # the model text is intact and a Sources footer now follows it.
+    final_content = outputs[-1][0][-1]["content"]
+    assert final_content.startswith("hi there")
+    assert "chatty-sources" in final_content
+    assert "doc.md" in final_content

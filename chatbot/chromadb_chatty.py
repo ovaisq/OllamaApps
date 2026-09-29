@@ -10,7 +10,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import chromadb
 import fastapi
@@ -23,20 +23,32 @@ from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
 from gdrive_config import AUTH_CONFIG
 from rag_common import (
     CATEGORY_MIME_TYPES,
-    TYPING_INDICATOR_CSS,
     TYPING_INDICATOR_HTML,
     build_catalog_chat_messages,
+    build_catalog_sources_footer,
     build_chat_messages,
     build_ollama_client,
+    build_sources_footer,
     detect_catalog_intent,
     detect_mentioned_sources,
     DriveSyncGate,
     embed_text,
     ensure_model_loaded,
+    error_bubble,
+    read_drive_sync_timestamp,
+    record_drive_sync_timestamp,
     safe_error_message,
-    CHAT_UI_JS,
+    stopped_html,
     validate_message,
+    WELCOME_MESSAGE,
     with_retries,
+)
+from ui_common import (
+    CHATTY_CSS,
+    CHATTY_THEME,
+    INDEX_CHIP_INTERVAL_SECONDS,
+    build_chat_tab,
+    format_index_chip,
 )
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
@@ -80,8 +92,10 @@ class ChromaChat:
         # Serializes Drive syncs: one click already spawns a worker pool;
         # a second concurrent click would re-embed the whole corpus again.
         self._sync_gate = DriveSyncGate()
-        # Distinct-source cache for name-routing (populated on demand).
-        self._sources_cache: Optional[List[str]] = None
+        # Distinct-source cache for name-routing AND the Library tab's
+        # index card (populated on demand): (source names, per-source chunk
+        # counts) so two viewers share one metadata scan.
+        self._sources_cache: Optional[Tuple[List[str], Dict[str, int]]] = None
         self._sources_cached_at: float = 0.0
 
     def _history_connection(self):
@@ -203,14 +217,61 @@ class ChromaChat:
     def list_sources(self, cache_seconds: float = 300.0) -> List[str]:
         """Distinct indexed document names (cached briefly -- chroma has no
         DISTINCT, and a full metadata scan per query is wasteful)."""
+        sources, _counts = self._load_source_metadata(cache_seconds)
+        return sources
+
+    def _load_source_metadata(self, cache_seconds: float = 300.0) -> Tuple[List[str], Dict[str, int]]:
+        """(distinct sources, per-source chunk counts), cached briefly.
+        Shared by name-routing (list_sources) and the Library tab's index
+        card (index_summary) so one metadata scan serves both."""
         now = time.time()
-        if self._sources_cache is not None and now - self._sources_cached_at < cache_seconds:
+        if (
+            self._sources_cache is not None
+            and now - self._sources_cached_at < cache_seconds
+        ):
             return self._sources_cache
         metas = (self.collection.get(include=["metadatas"]) or {}).get("metadatas") or []
-        sources = sorted({m.get("source") for m in metas if m and m.get("source")})
-        self._sources_cache = sources
+        counts: Dict[str, int] = {}
+        for meta in metas:
+            meta = meta or {}
+            source = meta.get("source")
+            if source:
+                counts[source] = counts.get(source, 0) + 1
+        sources = sorted(counts)
+        self._sources_cache = (sources, counts)
         self._sources_cached_at = now
-        return sources
+        return sources, counts
+
+    def index_summary(self, force: bool = False) -> Dict[str, Any]:
+        """Index stats for the Library tab / top-bar chip: total chunks,
+        distinct documents, top sources by chunk count, and the last
+        successful Drive sync time. Uses the same brief metadata cache as
+        name-routing; force=True (the manual 'Refresh stats' button) busts
+        it."""
+        sources, counts = self._load_source_metadata(0.0 if force else 300.0)
+        top_sources = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        return {
+            "chunks": self.count_chunks(),
+            "documents": len(sources),
+            "top_sources": top_sources,
+            "last_sync": read_drive_sync_timestamp(),
+        }
+
+    def load_feedback(self, user_email: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """This user's recent disliked answers, newest first -- the review
+        queue behind the Library tab's 'teach a correction' prefill."""
+        with self._history_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, question, answer, created_at FROM feedback "
+                "WHERE user_email = ? AND rating = 'dislike' "
+                "ORDER BY id DESC LIMIT ?",
+                (user_email, limit),
+            ).fetchall()
+        return [
+            {"id": row_id, "question": question, "answer": answer,
+             "created": created or ""}
+            for row_id, question, answer, created in rows
+        ]
 
     def retrieve_context(self, query: str) -> List[Tuple[str, Optional[Dict]]]:
         """Retrieve the most relevant (chunk, metadata) pairs from ChromaDB.
@@ -315,7 +376,11 @@ class ChromaChat:
         conv.reverse()
         return conv
 
-    def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
+    def _prepare_messages(self, query: str, history: List[Dict]):
+        """Build the RAG prompt AND the 'Sources' footer that gets shown
+        under the answer (the documents actually fed to the model). Split
+        from get_answer_stream so respond() can attach the footer without
+        retrieving the context a second time."""
         conversation_context = "\n".join(
             f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
         )
@@ -324,10 +389,15 @@ class ChromaChat:
         if catalog_intent:
             docs = self.list_documents(**catalog_intent)
             messages = build_catalog_chat_messages(docs, conversation_context, query)
+            sources_md = build_catalog_sources_footer(docs)
         else:
             context_chunks = self.retrieve_context(query)
             messages = build_chat_messages(context_chunks, conversation_context, query)
+            sources_md = build_sources_footer(context_chunks)
+        return messages, sources_md
 
+    def _stream_answer(self, messages: List[Dict], stop_event: threading.Event):
+        """Stream the model's answer, yielding the growing text."""
         stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
             options={"num_ctx": OLLAMA_CONFIG["num_ctx"]},
@@ -349,12 +419,21 @@ class ChromaChat:
             answer += content
             yield answer
 
+    def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
+        messages, _sources = self._prepare_messages(query, history)
+        yield from self._stream_answer(messages, stop_event)
+
     def respond(self, message: str, chat_history: List[Dict], state: Dict, request: gr.Request = None):
         """Handle a new message. `state` is a per-session dict holding this
         session's own stop Event so one user's Stop button can't affect
         another user's in-flight stream. Persists both sides of the
         exchange for the logged-in user (from the session cookie), if the
         request can be identified.
+
+        Display vs persistence: the user sees the raw model text plus
+        decorations (sources footer, error/stopped styling); what's saved
+        to history is the raw text, so reloads and feedback records stay
+        clean.
         """
         if state is None:
             state = {}
@@ -363,72 +442,61 @@ class ChromaChat:
 
         user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
         chat_history = chat_history or []
+        base = chat_history + [{"role": "user", "content": message}]
 
         try:
             validate_message(message, CHAT_CONFIG["max_message_length"])
         except ValueError as e:
-            yield (
-                chat_history + [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": str(e)},
-                ],
-                "",
-                state,
-            )
+            yield (base + [{"role": "assistant", "content": error_bubble(str(e))}],
+                   "", state)
             return
 
-        yield (
-            chat_history + [
-                {"role": "user", "content": message},
-                {"role": "assistant", "content": TYPING_INDICATOR_HTML},
-            ],
-            "",
-            state,
-        )
+        yield (base + [{"role": "assistant", "content": TYPING_INDICATOR_HTML}], "", state)
 
-        final_response = None
+        raw_answer = None      # model text as-is (what gets persisted)
+        sources_md = None      # footer for completed content-search answers
+        error_text = None      # set when preparation/streaming failed
+        persist_text = None
         try:
-            partial = ""
-            for partial in self.get_answer_stream(message, chat_history, stop_event):
+            messages, sources_md = self._prepare_messages(message, chat_history)
+            for partial in self._stream_answer(messages, stop_event):
                 if stop_event.is_set():
                     break
-                final_response = partial
-                yield (
-                    chat_history + [
-                        {"role": "user", "content": message},
-                        {"role": "assistant", "content": partial},
-                    ],
-                    "",
-                    state,
-                )
+                raw_answer = partial
+                yield (base + [{"role": "assistant", "content": partial}], "", state)
         except Exception as e:
-            final_response = safe_error_message(e, logger)
-            yield (
-                chat_history + [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": final_response},
-                ],
-                "",
-                state,
-            )
+            error_text = safe_error_message(e, logger)
+            yield (base + [{"role": "assistant", "content": error_bubble(error_text)}],
+                   "", state)
 
-        if final_response is None:
+        if error_text is not None:
+            # Keep the old behavior: the (safe, generic) error text is
+            # history that should be reviewable, so it gets persisted.
+            persist_text = error_text
+        elif raw_answer is None:
             # The stream produced no text (stopped before the first token,
             # or the model returned nothing at all): don't leave the typing
             # dots frozen on screen as if it were still thinking.
-            final_response = "(stopped)" if stop_event.is_set() else "(no response content)"
-            yield (
-                chat_history + [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": final_response},
-                ],
-                "",
-                state,
-            )
+            if stop_event.is_set():
+                yield (base + [{"role": "assistant", "content": stopped_html()}], "", state)
+            else:
+                yield (
+                    base + [{"role": "assistant",
+                             "content": error_bubble("The model returned no response content.")}],
+                    "", state,
+                )
+        else:
+            display = raw_answer
+            if stop_event.is_set():
+                display += stopped_html()
+            elif sources_md:
+                display += sources_md
+            yield (base + [{"role": "assistant", "content": display}], "", state)
+            persist_text = raw_answer
 
-        if user_email and final_response:
+        if user_email and persist_text:
             self.save_message(user_email, "user", message)
-            self.save_message(user_email, "assistant", final_response)
+            self.save_message(user_email, "assistant", persist_text)
 
     def stop_chat(self, chat_history: List[Dict], state: Dict):
         """Stop current chat response for this session only."""
@@ -439,11 +507,13 @@ class ChromaChat:
         return (chat_history, "", state)
 
     def load_history_ui(self, request: gr.Request = None) -> List[Dict]:
-        """Populate the Chat tab with this user's persisted history on page load."""
+        """Populate the Chat tab with this user's persisted history on page
+        load. A user with no history yet gets the welcome message so the
+        window doesn't open blank (it's only displayed, never persisted)."""
         user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
         if not user_email:
             return []
-        return self.load_history(user_email)
+        return self.load_history(user_email) or [WELCOME_MESSAGE]
 
     def clear_chat_ui(self, request: gr.Request = None):
         """Clear both the visible chat and this user's persisted history."""
@@ -472,9 +542,13 @@ class ChromaChat:
             logger.warning("Ignoring Drive sync trigger: a sync is already running or just finished")
             return -1
         try:
-            return run_chromadb_backend(get_access_token())
+            added = run_chromadb_backend(get_access_token())
         finally:
             self._sync_gate.finish()
+        if added >= 0:
+            # 'Drive synced 2 h ago' in the UI; failures never stamp it.
+            record_drive_sync_timestamp()
+        return added
 
 
 def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
@@ -483,42 +557,25 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
     Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
     """
     with gr.Blocks(title="Chatty") as blocks:
-        with gr.Row():
-            gr.Markdown("# Chatty: Document & Drive Assistant")
+        with gr.Row(elem_id="chatty-topbar"):
+            gr.Markdown("# Chatty\nDocument & Drive Assistant", elem_id="chatty-brand")
+            index_chip = gr.Markdown("", elem_id="chatty-chip")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
 
-        with gr.Tab("Chat"):
-            # autoscroll=False: Gradio's own autoscroll yanks the view to
-            # the bottom on every streamed token inside its threshold gap
-            # ("a pending answer blocks the scroll"). CHAT_UI_JS (wired to
-            # the load event below) implements one rule: follow the output
-            # only while the user is already at the bottom, plus an elapsed
-            # timer next to the typing dots while the answer is pending.
-            chatbot = gr.Chatbot(autoscroll=False)
-            msg = gr.Textbox(label="Ask about the README")
-            stop_btn = gr.Button("Stop Chat")
-            state = gr.State(value={})
+        # All chrome (theme, labels, layout, chat wiring) lives in the
+        # shared builders so the pgvector variant renders identically.
+        build_chat_tab(chat, blocks)
+        build_admin_tab(
+            chat.index_text, chat.index_summary, chat.sync_drive,
+            feedback_rows_fn=chat.load_feedback, blocks=blocks,
+        )
 
-            # show_progress: the default ('full' with no show_progress_on)
-            # renders the runtime timer on EVERY output component (chatbot
-            # + textbox: two timers). 'minimal' hides the trackers entirely
-            # (zero timers). One timer = 'full' scoped to the chatbot only.
-            msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state],
-                       queue=True, show_progress="full", show_progress_on=[chatbot])
-            stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state],
-                           show_progress="hidden")
-            # Like/Dislike on answers -> persisted for review + learning
-            # (the Admin tab's "Teach a correction" turns them into fixes).
-            chatbot.like(chat.record_feedback, chatbot, show_progress="hidden")
+        # Top-bar chip: first paint on load, then live via the timer.
+        def _chip() -> str:
+            return format_index_chip(chat.index_summary())
 
-            clear_btn = gr.Button("Clear History")
-            clear_btn.click(chat.clear_chat_ui, None, [chatbot, msg, state],
-                            show_progress="hidden")
-
-            blocks.load(chat.load_history_ui, None, chatbot, js=CHAT_UI_JS,
-                        show_progress="hidden")
-
-        build_admin_tab(chat.index_text, chat.count_chunks, chat.sync_drive)
+        blocks.load(_chip, None, index_chip, show_progress="hidden")
+        gr.Timer(INDEX_CHIP_INTERVAL_SECONDS).tick(_chip, None, index_chip)
 
     app = fastapi.FastAPI()
 
@@ -539,7 +596,8 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
         blocks.queue(),
         path="/",
         footer_links=[],
-        css=f"#signout-link {{text-align: right;}}\n{TYPING_INDICATOR_CSS}",
+        theme=CHATTY_THEME,
+        css=CHATTY_CSS,
     )
     return app
 

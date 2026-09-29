@@ -1,5 +1,6 @@
 """Shared helpers used by both the pgvector and ChromaDB chatbot variants."""
 import hashlib
+import html
 import io
 import logging
 import os
@@ -371,6 +372,56 @@ def format_context_chunks(chunks: List[Tuple[str, Optional[Dict[str, Any]]]]) ->
     return "\n\n".join(f"[{format_source_label(meta)}]\n{text}" for text, meta in chunks)
 
 
+def build_sources_footer(chunks: List[Tuple[str, Optional[Dict[str, Any]]]]) -> Optional[str]:
+    """Render the "Sources:" line shown under a content-search answer, from
+    the documents that were actually fed to the model. The user deserves to
+    see *which* files answered; the model's self-narration is not reliable
+    enough. Returns None when nothing was retrieved (an empty "Sources:"
+    footer would just be noise) -- the answer should say so itself.
+    """
+    if not chunks:
+        return None
+    labels: List[str] = []
+    for _text, meta in chunks:
+        label = format_source_label(meta)
+        if label not in labels:
+            labels.append(label)
+    shown = " · ".join(html.escape(label) for label in labels[:8])
+    more = f" · … ({len(labels)} total)" if len(labels) > 8 else ""
+    return f'<div class="chatty-sources">Sources: {shown}{more}</div>'
+
+
+def build_catalog_sources_footer(docs: List[Dict[str, Any]]) -> str:
+    """Footer for metadata-catalog answers ("list all PDFs"). Those are
+    answered from index metadata rather than a content search -- that's the
+    fact users should see, or a list they can't reconcile with the corpus
+    just looks wrong."""
+    labels: List[str] = []
+    for doc in docs:
+        label = format_source_label(doc)
+        if label not in labels:
+            labels.append(label)
+    shown = " · ".join(html.escape(label) for label in labels[:8]) or "(none)"
+    more = f" · … ({len(labels)} total)" if len(labels) > 8 else ""
+    return (
+        f'<div class="chatty-sources">Source: index metadata '
+        f"({len(docs)} document(s), not a content search) — {shown}{more}</div>"
+    )
+
+
+def error_bubble(message: str) -> str:
+    """Wrap failure text so it reads as a failure, not as an answer.
+    `message` must be app-generated text (safe_error_message, validation
+    errors) -- it is embedded verbatim, the same channel the typing
+    indicator uses, which Gradio 6 renders as HTML in message content."""
+    return f'<div class="chatty-error">⚠ {message}</div>'
+
+
+def stopped_html() -> str:
+    """Footer line for an answer the user stopped mid-stream."""
+    return '<div class="chatty-stopped">⏹ Stopped</div>'
+
+
 # Maps a "category" keyword to the mimeTypes/extensions that belong to it, so
 # "list all spreadsheets" can filter on stored metadata rather than needing a
 # semantic match (embedding similarity has no notion of "this is a
@@ -660,6 +711,49 @@ def with_retries(
             )
             time.sleep(sleep_for)
     raise last_exc
+
+
+# Shown as the only message in the chat window for a user with no history
+# yet. Without it, a first-time user stares at a blank window above a
+# textbox (the old "Ask about the README" era left nothing to explain what
+# Chatty is or what it can be asked).
+WELCOME_MESSAGE: Dict[str, str] = {
+    "role": "assistant",
+    "content": (
+        "**Chatty here.** Ask about anything in your documents -- "
+        "everything from Google Drive and your uploads is searchable.\n\n"
+        "Try: *What covers my Kona trip?* · *List all PDFs* · "
+        "*Who shared the Q3 report with me?*"
+    ),
+}
+
+
+def drive_sync_timestamp_path() -> str:
+    """Sidecar file next to the Drive token store holding the last
+    successful sync's completion time (float epoch), for the UI's
+    'Drive synced 2 h ago' line. Imported lazily: gdrive_config imports
+    this module, so a top-level import would be circular."""
+    from gdrive_config import DRIVE_CONFIG
+
+    return DRIVE_CONFIG["token_store_path"] + ".last_sync"
+
+
+def record_drive_sync_timestamp() -> None:
+    """Record that a Drive sync just succeeded. Never raises -- the sync
+    itself already succeeded; losing the timestamp is a cosmetic problem."""
+    try:
+        with open(drive_sync_timestamp_path(), "w", encoding="utf-8") as f:
+            f.write(repr(time.time()))
+    except OSError:
+        logger.warning("Could not record Drive sync timestamp", exc_info=True)
+
+
+def read_drive_sync_timestamp() -> Optional[float]:
+    try:
+        with open(drive_sync_timestamp_path(), encoding="utf-8") as f:
+            return float(f.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 def safe_error_message(exc: Exception, log: logging.Logger = None) -> str:

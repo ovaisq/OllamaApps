@@ -39,9 +39,23 @@ def make_client():
     return TestClient(app)
 
 
-def test_health_and_login_are_reachable_without_a_session():
+def test_login_and_oauth_start_are_reachable_without_a_session():
     client = make_client()
-    assert client.get("/login", follow_redirects=False).status_code in (302, 307)
+    assert client.get("/login", follow_redirects=False).status_code == 200
+    assert client.get("/oauth-start", follow_redirects=False).status_code in (302, 307)
+
+
+def test_login_renders_a_branded_page_not_json():
+    """/login must be a styled Chatty screen (with a retry affordance via
+    /oauth-start), not a bare redirect whose failure paths leave the user
+    on a JSON body."""
+    client = make_client()
+    resp = client.get("/login")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Chatty" in resp.text
+    assert 'href="/oauth-start"' in resp.text
+    assert '"status"' not in resp.text  # never a raw JSON body
 
 
 def test_protected_route_redirects_to_login_without_a_session_cookie():
@@ -68,12 +82,33 @@ def test_protected_route_accessible_with_a_valid_allowlisted_session():
     assert resp.status_code == 200
 
 
-def test_login_redirects_to_google_with_combined_scope():
+def test_oauth_start_redirects_to_google_with_combined_scope():
+    """The /login landing page's button hits /oauth-start, which must do
+    the Google redirect (combining app login + Drive read in one consent)."""
     client = make_client()
-    resp = client.get("/login", follow_redirects=False)
+    resp = client.get("/oauth-start", follow_redirects=False)
     assert "accounts.google.com" in resp.headers["location"]
     assert "drive.readonly" in resp.headers["location"]
-    assert "email" in resp.headers["location"]
+    # The redirect must have armed a one-shot state for the callback.
+    assert auth_routes._pending_state["value"]
+
+
+def test_oauth2callback_error_renders_branded_page_not_json():
+    """A cancelled consent used to be `{"status":"error","detail":...}` --
+    it must now be a styled error page (still a 4xx status for monitoring)."""
+    client = make_client()
+    resp = client.get("/oauth2callback", params={"error": "access_denied"})
+    assert resp.status_code == 400
+    assert "text/html" in resp.headers["content-type"]
+    assert "Chatty" in resp.text
+
+
+def test_oauth2callback_state_mismatch_renders_branded_page():
+    client = make_client()
+    resp = client.get("/oauth2callback", params={"code": "abc", "state": "unknown"})
+    assert resp.status_code == 403
+    assert "text/html" in resp.headers["content-type"]
+    assert '"status"' not in resp.text
 
 
 def test_oauth2callback_rejects_unknown_state():

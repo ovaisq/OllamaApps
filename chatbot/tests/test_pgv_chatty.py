@@ -153,13 +153,17 @@ def test_sync_drive_rejects_concurrent_triggers(chat):
     instance._sync_gate.finish()
 
 
-def test_sync_drive_runs_when_idle(chat):
+def test_sync_drive_runs_when_idle_and_records_the_sync_time(chat):
     instance, cursor = chat
     with patch("gdrive_indexer.get_access_token", return_value="token"), \
-         patch("gdrive_indexer.run_pgvector_backend", return_value=42) as run:
+         patch("gdrive_indexer.run_pgvector_backend", return_value=42) as run, \
+         patch("pgv_chatty.record_drive_sync_timestamp") as record:
         assert instance.sync_drive() == 42
 
     run.assert_called_once_with("token")
+    # A successful sync stamps the 'Drive synced 2 h ago' timestamp;
+    # blocked syncs (-1 path, other test) and failures never do.
+    record.assert_called_once()
 
 
 def test_scroll_follows_output_only_while_user_is_at_bottom(chat):
@@ -444,6 +448,85 @@ def test_load_history_ui_returns_empty_for_unauthenticated_request(chat):
         assert instance.load_history_ui(MagicMock()) == []
 
 
+def test_load_history_ui_shows_welcome_for_new_user(chat):
+    """A signed-in user with no history gets the welcome message instead of
+    a blank window (display-only, never persisted)."""
+    instance, cursor = chat
+    cursor.fetchall.return_value = []
+    with patch("pgv_chatty.get_email_from_request", return_value="user@example.com"):
+        history = instance.load_history_ui(MagicMock())
+
+    assert len(history) == 1
+    assert history[0]["role"] == "assistant"
+    assert "Chatty here" in history[0]["content"]
+
+
+def test_respond_appends_sources_footer_to_completed_answer(chat):
+    """A completed content-search answer shows which documents fed the
+    model -- the retrieval metadata used to be thrown away after building
+    the prompt."""
+    instance, cursor = chat
+    cursor.fetchall.return_value = [("chunk", {"source": "doc.md"}, 0.1)]
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    instance.ollama_client.chat.return_value = iter([{"message": {"content": "hi there"}}])
+
+    outputs = list(instance.respond("hello", [], {}))
+
+    final_content = outputs[-1][0][-1]["content"]
+    assert final_content.startswith("hi there")
+    assert "chatty-sources" in final_content
+    assert "doc.md" in final_content
+
+
+def test_respond_marks_a_user_stopped_answer(chat, monkeypatch):
+    """Stopping mid-stream keeps the partial text and appends a visible
+    Stopped marker -- not an error bubble, not frozen typing dots, and no
+    sources footer (the search was superseded)."""
+    instance, cursor = chat
+    cursor.fetchall.return_value = [("chunk", {"source": "doc.md"}, 0.1)]
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+
+    def fake_stream(messages, stop_event):
+        yield "partial answer"
+        stop_event.set()
+
+    monkeypatch.setattr(instance, "_stream_answer", fake_stream)
+
+    outputs = list(instance.respond("hello", [], {}))
+
+    final_content = outputs[-1][0][-1]["content"]
+    assert final_content.startswith("partial answer")
+    assert "chatty-stopped" in final_content
+    assert "chatty-sources" not in final_content
+
+
+def test_index_summary_reports_counts_and_top_sources(chat):
+    instance, cursor = chat
+    cursor.fetchone.return_value = (42,)
+    cursor.fetchall.return_value = [("Engineering Reports", 3), ("notes.md", 1)]
+
+    summary = instance.index_summary()
+
+    assert summary["chunks"] == 42
+    assert summary["documents"] == 2
+    assert summary["top_sources"] == [("Engineering Reports", 3), ("notes.md", 1)]
+    assert summary["last_sync"] is None
+
+
+def test_load_feedback_returns_recent_dislikes_for_user(chat):
+    """The Library tab's correction prefill lists this user's dislikes only."""
+    instance, cursor = chat
+    cursor.fetchall.return_value = [(7, "what host?", "wrong", "2026-01-02 03:04")]
+
+    rows = instance.load_feedback("user@example.com")
+
+    sql, params = cursor.execute.call_args.args
+    assert "rating = 'dislike'" in sql
+    assert params == ("user@example.com", 20)
+    assert rows == [{"id": 7, "question": "what host?", "answer": "wrong",
+                     "created": "2026-01-02 03:04"}]
+
+
 def test_clear_chat_ui_clears_persisted_history_for_identified_user(chat):
     instance, _cursor = chat
     with patch("pgv_chatty.get_email_from_request", return_value="user@example.com"), \
@@ -468,4 +551,9 @@ def test_stop_chat_only_stops_its_own_session(chat):
     assert state_a["stop_event"].is_set()
 
     outputs = list(instance.respond("hello", [], {}))
-    assert outputs[-1][0][-1]["content"] == "hi there"
+    # The full answer arrived (no leaked stop state); the model text is
+    # intact and a Sources footer now follows it.
+    final_content = outputs[-1][0][-1]["content"]
+    assert final_content.startswith("hi there")
+    assert "chatty-sources" in final_content
+    assert "doc.md" in final_content
