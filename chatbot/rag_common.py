@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,52 @@ def embed_text(client: Any, text: str, model: str, title: str = None) -> List[fl
     enriched = f"Title: {title}\nContent: {text}" if title else text
     enriched = normalize_text(enriched)
     return client.embeddings(model=model, prompt=enriched)["embedding"]
+
+
+def format_context_chunks(chunks: List[Tuple[str, Optional[str]]]) -> str:
+    """Tag each retrieved chunk with its source document. Without this the
+    model gets anonymous text blobs and can't say "Engineering Reports
+    covers X" -- it can only pattern-match on wording, which reads as
+    pedantic ("no specific mention of X") even when relevant content was
+    actually retrieved.
+    """
+    if not chunks:
+        return "(no relevant documents found)"
+    return "\n\n".join(f"[Source: {source or 'unknown source'}]\n{text}" for text, source in chunks)
+
+
+CHAT_SYSTEM_PROMPT = """You are a helpful research assistant with access to the user's indexed documents.
+
+How to answer:
+- If the question is a general or discovery-style query (e.g. "what do you have on X", "X reports?"), name the source document(s) you found and briefly summarize what each one covers.
+- If it's a specific factual question, answer it directly using the context, and say which document it came from.
+- Base your answer only on the provided context. If none of it is actually relevant to the question, say so plainly instead of guessing or claiming there's "no mention" when you've only seen a handful of excerpts, not the full document.
+- Do not answer general-knowledge questions from your own training data as if they came from the context. If the context has nothing relevant, say you found nothing relevant in the indexed documents -- don't substitute your own (possibly wrong) general knowledge as if it were grounded.
+"""
+
+
+def build_chat_messages(
+    context_chunks: List[Tuple[str, Optional[str]]], conversation_context: str, query: str
+) -> List[Dict[str, str]]:
+    """Build the RAG chat messages, split into a system role (instructions)
+    and a user role (context + question). Bundling instructions into a
+    single user-role message gives chat-tuned models much weaker
+    instruction-following than a proper system message.
+    """
+    context_text = format_context_chunks(context_chunks)
+    user_content = f"""Context (grouped by source document):
+{context_text}
+
+Previous conversation:
+{conversation_context}
+
+Question: {query}
+Answer:
+"""
+    return [
+        {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> Optional[str]:

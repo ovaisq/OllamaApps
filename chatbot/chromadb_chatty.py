@@ -8,7 +8,7 @@ conversation history, context retrieval, and real-time streaming of responses.
 import logging
 import os
 import threading
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import chromadb
 import fastapi
@@ -18,6 +18,7 @@ from admin_ui import build_admin_tab
 from auth_routes import register_routes as register_auth_routes
 from chroma_config import CHAT_CONFIG, CHROMA_CONFIG, OLLAMA_CONFIG
 from rag_common import (
+    build_chat_messages,
     build_ollama_client,
     embed_text,
     safe_error_message,
@@ -67,8 +68,8 @@ class ChromaChat:
             logger.exception("Health check failed")
             return False
 
-    def retrieve_context(self, query: str) -> List[str]:
-        """Retrieve the most relevant documents from ChromaDB for a query."""
+    def retrieve_context(self, query: str) -> List[Tuple[str, Optional[str]]]:
+        """Retrieve the most relevant (chunk, source_document) pairs from ChromaDB."""
         query_embedding = with_retries(
             lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
             attempts=OLLAMA_CONFIG["retry_attempts"],
@@ -76,7 +77,20 @@ class ChromaChat:
         results = self.collection.query(
             query_embeddings=[query_embedding], n_results=CHAT_CONFIG["top_k"]
         )
-        return results["documents"][0]
+        documents = results["documents"][0]
+        metadatas = results.get("metadatas") or [[]]
+        metadatas = metadatas[0] if metadatas[0] else [{}] * len(documents)
+        distances = (results.get("distances") or [[]])[0]
+
+        if distances:
+            logger.info("Closest retrieved chunk distance for query: %.4f", distances[0])
+
+        max_distance = CHAT_CONFIG.get("max_context_distance")
+        rows = list(zip(documents, metadatas, distances or [None] * len(documents)))
+        if max_distance is not None:
+            rows = [r for r in rows if r[2] is not None and r[2] <= max_distance]
+
+        return [(text, (meta or {}).get("source")) for text, meta, _ in rows]
 
     def get_last_conversation(self, history: List[Dict], pairs: int = 3) -> List[tuple]:
         conv = []
@@ -92,27 +106,16 @@ class ChromaChat:
 
     def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
         context_chunks = self.retrieve_context(query)
-        context_text = "\n".join(context_chunks)
         conversation_context = "\n".join(
             f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
         )
 
-        prompt = f"""
-You are a helpful assistant. Use the following context to answer the question accurately.
-Context:
-{context_text}
-
-Previous conversation:
-{conversation_context}
-
-Question: {query}
-Answer:
-"""
+        messages = build_chat_messages(context_chunks, conversation_context, query)
 
         stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
             options={"num_ctx": CHAT_CONFIG["max_context_length"]},
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             stream=True,
         )
         answer = ""
@@ -198,10 +201,7 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
     instance. Split out from main() so the UI construction (which uses a real
     Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
     """
-    with gr.Blocks(
-        title="Markdown Chatbot",
-        css="footer {display: none !important;} #signout-link {text-align: right;}",
-    ) as blocks:
+    with gr.Blocks(title="Markdown Chatbot") as blocks:
         with gr.Row():
             gr.Markdown("# ChromaDB: Markdown Chatbot")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
@@ -231,7 +231,13 @@ def build_app(chat: "ChromaChat") -> fastapi.FastAPI:
     # Google sign-in restricted to AUTH_CONFIG['allowed_emails'].
     register_auth_routes(app)
 
-    gr.mount_gradio_app(app, blocks.queue(), path="/")
+    gr.mount_gradio_app(
+        app,
+        blocks.queue(),
+        path="/",
+        footer_links=[],
+        css="#signout-link {text-align: right;}",
+    )
     return app
 
 

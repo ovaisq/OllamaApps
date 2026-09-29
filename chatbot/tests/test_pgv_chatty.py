@@ -34,12 +34,12 @@ def chat():
 def test_get_context_chunks_uses_vector_similarity_search(chat):
     """Regression test: retrieval must rank by embedding distance, not chunk length."""
     instance, cursor = chat
-    cursor.fetchall.return_value = [("relevant chunk",)]
+    cursor.fetchall.return_value = [("relevant chunk", "some_doc.md", 0.12)]
     instance.ollama_client.embeddings.return_value = {"embedding": [0.1, 0.2, 0.3]}
 
     result = instance.get_context_chunks("what is pgvector?")
 
-    assert result == ["relevant chunk"]
+    assert result == [("relevant chunk", "some_doc.md")]
     instance.ollama_client.embeddings.assert_called_once()
     sql, params = cursor.execute.call_args.args
     assert "<->" in sql
@@ -49,6 +49,24 @@ def test_get_context_chunks_uses_vector_similarity_search(chat):
     # `vector <-> numeric[]` fails in Postgres with UndefinedFunction.
     assert isinstance(params[0], Vector)
     assert params[0].to_list() == pytest.approx([0.1, 0.2, 0.3])
+
+
+def test_get_context_chunks_filters_out_irrelevant_matches_when_threshold_set(chat):
+    """A far-away nearest neighbor (e.g. asking "python" and getting a job
+    posting chunk back) should be dropped when max_context_distance is set,
+    rather than fed to the model as if it were relevant.
+    """
+    instance, cursor = chat
+    cursor.fetchall.return_value = [
+        ("close match", "doc_a.md", 0.1),
+        ("far, barely-related match", "doc_b.md", 5.0),
+    ]
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+
+    with patch("pgv_chatty.CHAT_CONFIG", {**pgv_chatty.CHAT_CONFIG, "max_context_distance": 1.0}):
+        result = instance.get_context_chunks("query")
+
+    assert result == [("close match", "doc_a.md")]
 
 
 def test_get_context_chunks_does_not_order_by_length(chat):
@@ -86,7 +104,7 @@ def test_respond_hides_internal_error_details_from_user(chat):
 
 def test_stop_chat_only_stops_its_own_session(chat):
     instance, cursor = chat
-    cursor.fetchall.return_value = [("chunk",)]
+    cursor.fetchall.return_value = [("chunk", "doc.md", 0.1)]
     instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
     instance.ollama_client.chat.return_value = iter(
         [{"message": {"content": "hi"}}, {"message": {"content": " there"}}]

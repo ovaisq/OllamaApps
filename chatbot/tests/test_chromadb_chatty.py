@@ -20,14 +20,33 @@ def chat():
 def test_retrieve_context_embeds_query_before_similarity_search(chat):
     instance, collection, ollama_client = chat
     ollama_client.embeddings.return_value = {"embedding": [0.1, 0.2]}
-    collection.query.return_value = {"documents": [["relevant chunk"]]}
+    collection.query.return_value = {
+        "documents": [["relevant chunk"]],
+        "metadatas": [[{"source": "some_doc.md"}]],
+        "distances": [[0.1]],
+    }
 
     result = instance.retrieve_context("what is chromadb?")
 
-    assert result == ["relevant chunk"]
+    assert result == [("relevant chunk", "some_doc.md")]
     ollama_client.embeddings.assert_called_once()
     _, kwargs = collection.query.call_args
     assert kwargs["query_embeddings"] == [[0.1, 0.2]]
+
+
+def test_retrieve_context_filters_out_irrelevant_matches_when_threshold_set(chat):
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {
+        "documents": [["close match", "far, barely-related match"]],
+        "metadatas": [[{"source": "doc_a.md"}, {"source": "doc_b.md"}]],
+        "distances": [[0.1, 5.0]],
+    }
+
+    with patch("chromadb_chatty.CHAT_CONFIG", {**chromadb_chatty.CHAT_CONFIG, "max_context_distance": 1.0}):
+        result = instance.retrieve_context("query")
+
+    assert result == [("close match", "doc_a.md")]
 
 
 def test_respond_rejects_oversized_message_without_calling_llm(chat):
@@ -52,7 +71,11 @@ def test_respond_hides_internal_error_details_from_user(chat):
 def test_stop_chat_only_stops_its_own_session(chat):
     instance, collection, ollama_client = chat
     ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {"documents": [["chunk"]]}
+    collection.query.return_value = {
+        "documents": [["chunk"]],
+        "metadatas": [[{"source": "doc.md"}]],
+        "distances": [[0.1]],
+    }
     ollama_client.chat.return_value = iter(
         [{"message": {"content": "hi"}}, {"message": {"content": " there"}}]
     )

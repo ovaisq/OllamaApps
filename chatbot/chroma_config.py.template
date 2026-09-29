@@ -30,4 +30,12 @@ CHAT_CONFIG = {
     'reload_interval': int(os.getenv('RELOAD_INTERVAL', 30)),
     'max_context_length': int(os.getenv('MAX_CONTEXT_LENGTH', 8192)),
     'max_message_length': int(os.getenv('MAX_MESSAGE_LENGTH', 4000)),
+    # Chroma L2 distance above which a retrieved chunk is treated as "not
+    # actually relevant" and dropped rather than fed to the model. Unset
+    # (default) disables filtering -- every chat query logs the closest
+    # match's distance, so you can pick a real threshold from observed
+    # values instead of a guessed one.
+    'max_context_distance': (
+        float(os.environ['MAX_CONTEXT_DISTANCE']) if os.getenv('MAX_CONTEXT_DISTANCE') else None
+    ),
 }

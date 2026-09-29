@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 from contextlib import contextmanager
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import fastapi
 import gradio as gr
@@ -16,6 +16,7 @@ from admin_ui import build_admin_tab
 from auth_routes import register_routes as register_auth_routes
 from pgv_config import CHAT_CONFIG, DB_CONFIG, DB_POOL_CONFIG, OLLAMA_CONFIG
 from rag_common import (
+    build_chat_messages,
     build_ollama_client,
     embed_text,
     safe_error_message,
@@ -81,8 +82,10 @@ class PGVectorChat:
             logger.exception("Health check failed")
             return False
 
-    def get_context_chunks(self, query: str) -> List[str]:
-        """Retrieve the most relevant chunks via pgvector nearest-neighbor search."""
+    def get_context_chunks(self, query: str) -> List[Tuple[str, Optional[str]]]:
+        """Retrieve the most relevant (chunk, source_document) pairs via
+        pgvector nearest-neighbor search.
+        """
         query_embedding = with_retries(
             lambda: embed_text(self.ollama_client, query, OLLAMA_CONFIG["embedding_model"]),
             attempts=OLLAMA_CONFIG["retry_attempts"],
@@ -90,11 +93,20 @@ class PGVectorChat:
         with self._connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT chunk FROM markdown_chunks "
-                    "ORDER BY embedding <-> %s LIMIT %s",
+                    "SELECT chunk, metadata->>'source' AS source, embedding <-> %s AS distance "
+                    "FROM markdown_chunks ORDER BY distance LIMIT %s",
                     (Vector(query_embedding), CHAT_CONFIG["top_k"]),
                 )
-                return [row[0] for row in cursor.fetchall()]
+                rows = cursor.fetchall()
+
+        if rows:
+            logger.info("Closest retrieved chunk distance for query: %.4f", rows[0][2])
+
+        max_distance = CHAT_CONFIG.get("max_context_distance")
+        if max_distance is not None:
+            rows = [r for r in rows if r[2] <= max_distance]
+
+        return [(r[0], r[1]) for r in rows]
 
     def get_last_conversation(self, history: List[Dict], count: int = 2) -> List[tuple]:
         """Get last conversation turns."""
@@ -111,27 +123,16 @@ class PGVectorChat:
     def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
         """Generate streaming response."""
         context_chunks = self.get_context_chunks(query)
-        context_text = "\n".join(context_chunks)
 
         conversation_context = "\n".join(
             f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
         )
 
-        prompt = f"""
-You are a helpful assistant. Use the following context to answer the question accurately.
-Context:
-{context_text}
-
-Previous conversation:
-{conversation_context}
-
-Question: {query}
-Answer:
-"""
+        messages = build_chat_messages(context_chunks, conversation_context, query)
 
         response_stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             stream=True,
             options={"num_ctx": CHAT_CONFIG["max_context_length"]},
         )
@@ -206,11 +207,7 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
     instance. Split out from main() so the UI construction (which uses a real
     Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
     """
-    with gr.Blocks(
-        title="Markdown Document Chatbot",
-        css="footer {display: none !important;} #signout-link {text-align: right;}",
-        theme="JohnSmith9982/small_and_pretty",
-    ) as chatty:
+    with gr.Blocks(title="Markdown Document Chatbot") as chatty:
         with gr.Row():
             gr.Markdown("# Markdown Document Chatbot")
             gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
@@ -243,7 +240,14 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
     # Google sign-in restricted to AUTH_CONFIG['allowed_emails'].
     register_auth_routes(app)
 
-    gr.mount_gradio_app(app, chatty.queue(), path="/")
+    gr.mount_gradio_app(
+        app,
+        chatty.queue(),
+        path="/",
+        footer_links=[],
+        theme="JohnSmith9982/small_and_pretty",
+        css="#signout-link {text-align: right;}",
+    )
     return app
 
 
