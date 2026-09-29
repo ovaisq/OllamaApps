@@ -1,8 +1,8 @@
-ollama
-gradio
-chromadb
-langchain
-psycopg2-binary
-pgvector
-httpx
-pypdf
+ollama==0.6.2
+gradio==6.28.0
+chromadb==1.5.9
+langchain==1.4.3
+psycopg2-binary==2.9.13
+pgvector==0.5.0
+httpx==0.28.1
+pypdf==6.19.0

@@ -191,7 +191,7 @@ def main():
     ) as chatty:
         gr.Markdown("# Markdown Document Chatbot")
 
-        chatbot = gr.Chatbot(type="messages", label="Chat History")
+        chatbot = gr.Chatbot(label="Chat History")
         msg = gr.Textbox(label="Your Message")
         stop_btn = gr.Button("Stop Response")
         state = gr.State(value={})

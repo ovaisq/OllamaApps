@@ -180,7 +180,7 @@ def main():
 
     with gr.Blocks(title="Markdown Chatbot", css="footer {display: none !important;}") as blocks:
         gr.Markdown("# ChromaDB: Markdown Chatbot")
-        chatbot = gr.Chatbot(type="messages")
+        chatbot = gr.Chatbot()
         msg = gr.Textbox(label="Ask about the README")
         stop_btn = gr.Button("Stop Chat")
         state = gr.State(value={})
