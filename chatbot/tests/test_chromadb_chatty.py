@@ -241,30 +241,39 @@ def test_stream_with_no_text_yields_placeholder_not_frozen_dots(chat):
 
 
 def test_progress_timer_shows_in_one_place(chat):
-    """Gradio's default show_progress='full' renders the runtime timer in
-    two places at once (upper-right corner + a spinner over the output
-    components). The chat event must use 'minimal' (corner timer only --
-    the typing dots are the in-bubble cue), and quick UI actions must be
-    'hidden' so they don't flash timers."""
+    """Gradio's default ('full' with no show_progress_on) renders the
+    runtime timer on EVERY output component -- chat submit has two outputs
+    (chatbot + textbox), so users saw two timers. 'minimal' hides the
+    trackers entirely (zero timers, verified against the 6.28 statustracker
+    bundle). One timer = 'full' scoped to a single component via
+    show_progress_on; quick UI actions must be 'hidden'."""
     instance, collection, ollama_client = chat
     app = chromadb_chatty.build_app(instance)
 
     mount = next(r for r in app.routes if type(r).__name__ == "Mount")
-    deps = mount.app.blocks.config["dependencies"]
+    config = mount.app.blocks.config
+    deps = config["dependencies"]
+    chatbot_ids = {c["id"] for c in config["components"] if c.get("type") == "chatbot"}
 
     submit_dep = next(
         d for d in deps
         if any(isinstance(t, (list, tuple)) and t[1] == "submit" for t in d["targets"])
     )
-    assert submit_dep["show_progress"] == "minimal"
+    assert submit_dep["show_progress"] == "full"
+    assert set(submit_dep["show_progress_on"]) == chatbot_ids, (
+        "the chat timer must be scoped to the chatbot only, not every output"
+    )
     like_dep = next(
         d for d in deps
         if any(isinstance(t, (list, tuple)) and t[1] == "like" for t in d["targets"])
     )
     assert like_dep["show_progress"] == "hidden"
-    assert all(d["show_progress"] in ("minimal", "hidden") for d in deps), (
-        "no event may use 'full' progress (dual timer)"
-    )
+    for d in deps:
+        if d["show_progress"] == "full":
+            assert len(d["show_progress_on"]) == 1, (
+                "'full' without a single show_progress_on target renders "
+                "one timer per output component (duplicates)"
+            )
 
 
 def test_respond_hides_internal_error_details_from_user(chat):

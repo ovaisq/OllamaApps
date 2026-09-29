@@ -103,18 +103,19 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
             file_types=[".md", ".txt", ".pdf", ".xlsx"],
         )
         upload_status = gr.Markdown()
-        # "minimal": one timer (corner runtime display) for long-running
-        # indexing; the status markdown reports the result.
+        # One timer ('full' scoped to the status line only -- the default
+        # would render it on every output component).
         upload.upload(
             lambda f: upload_and_index(f.name if f else None, index_text_fn),
-            upload, upload_status, show_progress="minimal",
+            upload, upload_status,
+            show_progress="full", show_progress_on=[upload_status],
         )
 
         gr.Markdown("## Google Drive")
         drive_status = gr.Markdown()
         sync_btn = gr.Button("Sync Google Drive now")
         sync_btn.click(lambda: sync_drive_now(drive_sync_fn), None, drive_status,
-                       show_progress="minimal")
+                       show_progress="full", show_progress_on=[drive_status])
 
         gr.Markdown(
             "## Teach Chatty a correction\n"
@@ -130,7 +131,7 @@ def build_admin_tab(index_text_fn, count_fn, drive_sync_fn) -> None:
             return teach_correction(question, answer, index_text_fn, request)
 
         teach_btn.click(_teach, [wrong_question, correct_answer], teach_status,
-                        show_progress="minimal")
+                        show_progress="full", show_progress_on=[teach_status])
 
         gr.Markdown("## Index status")
         stats = gr.Markdown()

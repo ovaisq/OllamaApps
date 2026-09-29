@@ -466,12 +466,12 @@ def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
             stop_btn = gr.Button("Stop Response")
             state = gr.State(value={})
 
-            # show_progress: "full" (default) renders the runtime timer in
-            # two places at once (upper-right corner + a spinner over the
-            # output components). "minimal" = corner timer only; the
-            # typing dots remain the in-bubble activity cue.
+            # show_progress: the default ('full' with no show_progress_on)
+            # renders the runtime timer on EVERY output component (chatbot
+            # + textbox: two timers). 'minimal' hides the trackers entirely
+            # (zero timers). One timer = 'full' scoped to the chatbot only.
             msg.submit(chat.respond, [msg, chatbot, state], [chatbot, msg, state],
-                       queue=True, show_progress="minimal")
+                       queue=True, show_progress="full", show_progress_on=[chatbot])
             stop_btn.click(chat.stop_chat, [chatbot, state], [chatbot, msg, state],
                            show_progress="hidden")
             # Like/Dislike on answers -> persisted for review + learning
