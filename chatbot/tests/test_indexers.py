@@ -78,6 +78,50 @@ def test_chromadb_index_text_skips_a_chunk_that_exceeds_model_context_without_lo
     assert collection.add.call_args.kwargs["documents"] == ["a normal chunk"]
 
 
+def test_pgv_index_text_skips_low_information_chunks():
+    """Mostly-numeric chunks (spreadsheet cell dumps like bq-results rows)
+    bury real documents in vector search; the indexer must not embed them
+    at all. One real deployment's index was 60% such rows."""
+    fake_conn = MagicMock()
+    select_cursor = MagicMock()
+    select_cursor.__enter__.return_value = select_cursor
+    select_cursor.fetchall.return_value = []
+
+    insert_cursor = MagicMock()
+    insert_cursor.__enter__.return_value = insert_cursor
+    fake_conn.cursor.side_effect = [select_cursor, insert_cursor]
+
+    mock_client = MagicMock()
+    mock_client.embeddings.return_value = {"embedding": [0.1]}
+
+    with patch("pgv_indexer.build_ollama_client", return_value=mock_client), \
+         patch("pgv_indexer.create_chunks", return_value=[
+             "2020,4,29,4.39,202 2020,4,30,3.85,113 2020,4,31,1.68,79",
+             "Kona does not like peeing in new environments and may hold it in.",
+         ]):
+        inserted = pgv_indexer.index_text("irrelevant", "bq-results", fake_conn)
+
+    assert inserted == 1
+    (call,) = insert_cursor.executemany.call_args.args[1]
+    assert call[0].startswith("Kona does not like")
+
+
+def test_chromadb_index_text_skips_low_information_chunks():
+    collection = MagicMock()
+    collection.get.return_value = {"ids": []}
+    client = MagicMock()
+    client.embeddings.return_value = {"embedding": [0.1]}
+
+    with patch("chromadb_indexer.create_chunks", return_value=[
+        "2020,4,29,4.39,202 2020,4,30,3.85,113",
+        "Kona does not like peeing in new environments.",
+    ]):
+        inserted = chromadb_indexer.index_text("irrelevant", "bq-results", collection, client)
+
+    assert inserted == 1
+    assert collection.add.call_args.kwargs["documents"][0].startswith("Kona does not like")
+
+
 def test_chromadb_index_markdown_skips_existing_ids(tmp_path):
     md_file = tmp_path / "doc.md"
     text = "hello world, this is a short markdown file."

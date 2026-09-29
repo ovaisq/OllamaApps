@@ -240,6 +240,31 @@ def test_stream_with_no_text_yields_placeholder_not_frozen_dots(chat):
     assert "no response content" in outputs[-1][0][-1]["content"]
 
 
+def test_named_documents_are_routed_to_the_front_of_retrieval(chat):
+    """A document the user names explicitly must lead the context even
+    when global vector ranking would miss it."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.get.return_value = {
+        "metadatas": [{"source": "Kona April 2026"}, {"source": "bq-results"}]
+    }
+    collection.query.side_effect = [
+        {"documents": [["numeric row chunk"]],
+         "metadatas": [[{"source": "bq-results"}]],
+         "distances": [[0.9]]},
+        {"documents": [["kona care chunk"]],
+         "metadatas": [[{"source": "Kona April 2026"}]],
+         "distances": [[0.5]]},
+    ]
+
+    result = instance.retrieve_context("What is the Kona April 2026 document about?")
+
+    assert result[0] == ("kona care chunk", {"source": "Kona April 2026"})
+    assert len(result) == 2
+    routed_call = collection.query.call_args_list[1]
+    assert routed_call.kwargs["where"] == {"source": {"$eq": "Kona April 2026"}}
+
+
 def test_progress_timer_shows_in_one_place(chat):
     """Gradio's default ('full' with no show_progress_on) renders the
     runtime timer on EVERY output component -- chat submit has two outputs

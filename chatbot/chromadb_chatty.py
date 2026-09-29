@@ -9,6 +9,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 import chromadb
@@ -28,6 +29,7 @@ from rag_common import (
     build_chat_messages,
     build_ollama_client,
     detect_catalog_intent,
+    detect_mentioned_sources,
     DriveSyncGate,
     embed_text,
     ensure_model_loaded,
@@ -78,6 +80,9 @@ class ChromaChat:
         # Serializes Drive syncs: one click already spawns a worker pool;
         # a second concurrent click would re-embed the whole corpus again.
         self._sync_gate = DriveSyncGate()
+        # Distinct-source cache for name-routing (populated on demand).
+        self._sources_cache: Optional[List[str]] = None
+        self._sources_cached_at: float = 0.0
 
     def _history_connection(self):
         return sqlite3.connect(self._history_db_path)
@@ -195,8 +200,26 @@ class ChromaChat:
             logger.exception("Health check failed")
             return False
 
+    def list_sources(self, cache_seconds: float = 300.0) -> List[str]:
+        """Distinct indexed document names (cached briefly -- chroma has no
+        DISTINCT, and a full metadata scan per query is wasteful)."""
+        now = time.time()
+        if self._sources_cache is not None and now - self._sources_cached_at < cache_seconds:
+            return self._sources_cache
+        metas = (self.collection.get(include=["metadatas"]) or {}).get("metadatas") or []
+        sources = sorted({m.get("source") for m in metas if m and m.get("source")})
+        self._sources_cache = sources
+        self._sources_cached_at = now
+        return sources
+
     def retrieve_context(self, query: str) -> List[Tuple[str, Optional[Dict]]]:
-        """Retrieve the most relevant (chunk, metadata) pairs from ChromaDB."""
+        """Retrieve the most relevant (chunk, metadata) pairs from ChromaDB.
+
+        A document the query explicitly names is routed ahead of pure
+        distance order: with a corpus dominated by dense numeric chunks,
+        embedding luck can keep a named document out of the top-k
+        entirely (the "Kona April 2026" failure).
+        """
         query_embedding = with_retries(
             lambda: embed_text(
                 self.ollama_client,
@@ -212,13 +235,35 @@ class ChromaChat:
         documents = results["documents"][0]
         metadatas = results.get("metadatas") or [[]]
         metadatas = metadatas[0] if metadatas[0] else [{}] * len(documents)
-        distances = (results.get("distances") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0] or [None] * len(documents)
+
+        mentioned_sources = detect_mentioned_sources(query, self.list_sources())
+        if mentioned_sources:
+            where = (
+                {"source": {"$eq": mentioned_sources[0]}} if len(mentioned_sources) == 1
+                else {"$or": [{"source": {"$eq": m}} for m in mentioned_sources]}
+            )
+            focused = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=CHAT_CONFIG["top_k"],
+                where=where,
+            )
+            f_docs = focused["documents"][0]
+            f_metas = (focused.get("metadatas") or [[]])[0] or [{}] * len(f_docs)
+            f_dists = (focused.get("distances") or [[]])[0] or [None] * len(f_docs)
+            seen = set(f_docs)
+            keep = [
+                i for i, doc in enumerate(documents) if doc not in seen
+            ]
+            documents = (f_docs + [documents[i] for i in keep])[:CHAT_CONFIG["top_k"]]
+            metadatas = (f_metas + [metadatas[i] for i in keep])[:CHAT_CONFIG["top_k"]]
+            distances = (f_dists + [distances[i] for i in keep])[:CHAT_CONFIG["top_k"]]
 
         if distances:
             logger.info("Closest retrieved chunk distance for query: %.4f", distances[0])
 
         max_distance = CHAT_CONFIG.get("max_context_distance")
-        rows = list(zip(documents, metadatas, distances or [None] * len(documents)))
+        rows = list(zip(documents, metadatas, distances))
         if max_distance is not None:
             rows = [r for r in rows if r[2] is not None and r[2] <= max_distance]
 

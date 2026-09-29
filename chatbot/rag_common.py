@@ -408,6 +408,54 @@ _LISTING_VERBS = ("list", "show me", "show", "what", "which", "find me", "find",
 _PERSON_RE = re.compile(r"(?:shared by|owned by|from)\s+([A-Za-z][\w'-]*)", re.IGNORECASE)
 
 
+def normalize_source_name(name: str) -> str:
+    """Lowercase, whitespace-normalized form for source/query matching."""
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def detect_mentioned_sources(query: str, sources: List[str], min_length: int = 4) -> List[str]:
+    """Return indexed source names the query explicitly mentions.
+
+    Pure vector ranking can bury a document the user NAMED: when the
+    corpus is dominated by dense numeric chunks (spreadsheet dumps),
+    queries with a numeric/date flavor land inside that cloud and the
+    named document's chunks never reach the top-k -- "what's Kona April
+    2026 about?" returned bq-results rows instead. An explicit name match
+    is a far stronger intent signal than embedding distance, so named
+    sources get routed to the front of retrieval.
+
+    Args:
+        query: The user's question.
+        sources: Known source names from the index.
+        min_length: Sources shorter than this never match (a 1-char doc
+            like "R" would substring-match almost any query).
+
+    Returns:
+        The subset of `sources` the query names, in their given order.
+    """
+    q = normalize_source_name(query)
+    return [
+        source for source in sources
+        if len(normalize_source_name(source)) >= min_length
+        and normalize_source_name(source) in q
+    ]
+
+
+def is_low_information(text: str, min_alpha_ratio: float = 0.3) -> bool:
+    """True for chunks that are mostly digits/punctuation (spreadsheet
+    cell dumps like "2020,4,29,4.39,202").
+
+    Such chunks carry nothing for RAG answers and poison vector search:
+    one 1400-chunk bq-results dump made up 60% of a real deployment's
+    index and buried actual documents for numeric-flavored queries.
+    They are skipped at indexing time.
+    """
+    if not text:
+        return True
+    alpha = sum(1 for ch in text if ch.isalpha())
+    return alpha / len(text) < min_alpha_ratio
+
+
 def detect_catalog_intent(query: str) -> Optional[Dict[str, Any]]:
     """Detect "show me all documents shared by Jen" / "list all PDFs" style
     enumeration questions, which a vector similarity search can't answer

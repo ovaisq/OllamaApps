@@ -258,6 +258,26 @@ def test_stream_with_no_text_yields_placeholder_not_frozen_dots(chat):
     assert "no response content" in outputs[-1][0][-1]["content"]
 
 
+def test_named_documents_are_routed_to_the_front_of_retrieval(chat):
+    """A document the user names explicitly must reach the model's context
+    even when dense numeric chunks would otherwise own the top-k (the
+    'Kona April 2026' failure: real content chunks existed in the index
+    but never got retrieved)."""
+    instance, cursor = chat
+    instance.ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    cursor.fetchall.side_effect = [
+        [("Kona April 2026",), ("bq-results-20231216",)],
+        [("Kona content chunk", {"source": "Kona April 2026"}, 0.5)],
+    ]
+
+    result = instance.get_context_chunks("What is the Kona April 2026 document about?")
+
+    assert result == [("Kona content chunk", {"source": "Kona April 2026"})]
+    sql, params = cursor.execute.call_args.args
+    assert "ANY(" in sql
+    assert params[1] == ["Kona April 2026"]
+
+
 def test_progress_timer_shows_in_one_place(chat):
     """Gradio's default ('full' with no show_progress_on) renders the
     runtime timer on EVERY output component -- chat submit has two outputs

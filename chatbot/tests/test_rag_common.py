@@ -156,3 +156,29 @@ def test_chat_ui_js_renders_a_visible_elapsed_timer():
     the typing dots while the answer is pending."""
     assert "typing-timer" in rag_common.CHAT_UI_JS
     assert "typing-timer" in rag_common.TYPING_INDICATOR_CSS
+
+
+def test_detect_mentioned_sources_routes_named_documents():
+    sources = ["Kona April 2026", "Movie Data Starter Project", "R"]
+    assert rag_common.detect_mentioned_sources(
+        "What is the Kona April 2026 document about?", sources
+    ) == ["Kona April 2026"]
+    # Matching is case- and whitespace-insensitive.
+    assert rag_common.detect_mentioned_sources("kona  APRIL 2026?", sources) == [
+        "Kona April 2026"
+    ]
+
+
+def test_detect_mentioned_sources_ignores_tiny_source_names():
+    """A 1-char source like 'R' substring-matches almost any query and
+    would hijack retrieval."""
+    assert rag_common.detect_mentioned_sources("what is R about?", ["R"]) == []
+
+
+def test_is_low_information_skips_numeric_dumps_but_keeps_prose():
+    """Spreadsheet cell dumps bury real documents in vector search and
+    carry nothing for RAG answers; prose must never be flagged."""
+    assert rag_common.is_low_information("2020,4,29,4.39,202 2020,4,30,3.85,113")
+    assert not rag_common.is_low_information(
+        "Kona does not like peeing in new environments, so may initially hold it in."
+    )

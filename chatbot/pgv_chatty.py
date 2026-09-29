@@ -26,6 +26,7 @@ from rag_common import (
     build_chat_messages,
     build_ollama_client,
     detect_catalog_intent,
+    detect_mentioned_sources,
     DriveSyncGate,
     embed_text,
     ensure_model_loaded,
@@ -224,9 +225,21 @@ class PGVectorChat:
             logger.exception("Health check failed")
             return False
 
+    def list_sources(self) -> List[str]:
+        """Distinct indexed document names, used for name-routing."""
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT DISTINCT metadata->>'source' FROM markdown_chunks")
+                return [row[0] for row in cursor.fetchall() if row[0]]
+
     def get_context_chunks(self, query: str) -> List[Tuple[str, Optional[Dict]]]:
         """Retrieve the most relevant (chunk, metadata) pairs via pgvector
         nearest-neighbor search.
+
+        A document the query explicitly names is routed ahead of pure
+        distance order: with a corpus dominated by dense numeric chunks,
+        embedding luck can keep a named document out of the top-k
+        entirely (the "Kona April 2026" failure).
         """
         query_embedding = with_retries(
             lambda: embed_text(
@@ -237,13 +250,23 @@ class PGVectorChat:
             ),
             attempts=OLLAMA_CONFIG["retry_attempts"],
         )
+        mentioned_sources = detect_mentioned_sources(query, self.list_sources())
         with self._connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT chunk, metadata, embedding <-> %s AS distance "
-                    "FROM markdown_chunks ORDER BY distance LIMIT %s",
-                    (Vector(query_embedding), CHAT_CONFIG["top_k"]),
-                )
+                if mentioned_sources:
+                    cursor.execute(
+                        "SELECT chunk, metadata, embedding <-> %s AS distance "
+                        "FROM markdown_chunks "
+                        "ORDER BY CASE WHEN metadata->>'source' = ANY(%s) "
+                        "THEN 0 ELSE 1 END, distance LIMIT %s",
+                        (Vector(query_embedding), mentioned_sources, CHAT_CONFIG["top_k"]),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT chunk, metadata, embedding <-> %s AS distance "
+                        "FROM markdown_chunks ORDER BY distance LIMIT %s",
+                        (Vector(query_embedding), CHAT_CONFIG["top_k"]),
+                    )
                 rows = cursor.fetchall()
 
         if rows:

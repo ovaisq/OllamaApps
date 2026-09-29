@@ -11,7 +11,7 @@ from pgv_config import DB_CONFIG, INDEXER_CONFIG, OLLAMA_CONFIG
 from pgv_utils import (
     read_markdown, create_chunks, embed_text, normalize_text
 )
-from rag_common import build_ollama_client
+from rag_common import build_ollama_client, is_low_information
 
 def setup_logging():
     """Setup logging configuration."""
@@ -53,6 +53,12 @@ def index_text(text: str, source: str, db_connection, extra_metadata: dict = Non
     for chunk in chunks:
         norm_chunk = normalize_text(chunk)
         if norm_chunk not in existing_chunks:
+            if is_low_information(norm_chunk):
+                # Spreadsheet cell dumps ("2020,4,29,4.39,202") embed into
+                # a dense numeric cloud that buries real documents in
+                # vector search, and carry nothing for RAG answers.
+                logging.info(f"Skipping a low-information chunk from {source}")
+                continue
             try:
                 embedding = embed_text(
                     client, chunk, OLLAMA_CONFIG['embedding_model'], source,

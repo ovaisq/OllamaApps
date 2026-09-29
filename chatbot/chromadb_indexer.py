@@ -17,6 +17,7 @@ from rag_common import (
     chunk_hash,
     create_chunks,
     embed_text,
+    is_low_information,
     normalize_text,
     read_markdown,
 )
@@ -44,6 +45,11 @@ def index_text(text: str, source: str, collection, client, extra_metadata: dict 
     for chunk in chunks:
         cid = chunk_hash(chunk)
         if cid not in existing_ids and cid not in unique_data:
+            if is_low_information(normalize_text(chunk)):
+                # Spreadsheet cell dumps embed into a dense numeric cloud
+                # that buries real documents in vector search.
+                logger.info("Skipping a low-information chunk from %s", source)
+                continue
             try:
                 embedding = embed_text(
                     client, chunk, OLLAMA_CONFIG["embedding_model"],
