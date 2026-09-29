@@ -1,0 +1,40 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-chatbot}
+      POSTGRES_USER: ${DB_USER:-chatbot}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./pgvector.sql:/docker-entrypoint-initdb.d/01-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-chatbot} -d ${DB_NAME:-chatbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chatbot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-chatbot}
+      DB_USER: ${DB_USER:-chatbot}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      GDRIVE_TOKEN_STORE: /data/gdrive_token.json
+      PORT: "7860"
+    ports:
+      - "7860:7860"
+    volumes:
+      - gdrive_data:/data
+
+volumes:
+  db_data:
+  gdrive_data:

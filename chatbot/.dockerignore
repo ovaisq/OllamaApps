@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+pgv_config.py
+chroma_config.py
+gdrive_config.py
+gdrive_token.json
+chroma_db/
+tests/
+.git
+.gitignore
+.pytest_cache/
