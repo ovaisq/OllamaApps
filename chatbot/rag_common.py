@@ -1,6 +1,5 @@
 """Shared helpers used by both the pgvector and ChromaDB chatbot variants."""
 import hashlib
-import html
 import io
 import logging
 import os
@@ -18,125 +17,6 @@ logger = logging.getLogger(__name__)
 # progress/error lines. Failures still surface: httpx errors raise into our
 # own log calls. Set before any app imports rag_common.
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
-# Shown immediately on submit, before the embedding call/model warm-up/first
-# token -- without it the chat window shows nothing at all for however long
-# retrieval + a cold model load takes, which reads as broken, not just slow.
-TYPING_INDICATOR_HTML = (
-    '<div class="typing-indicator"><span></span><span></span><span></span></div>'
-)
-
-# Paired with TYPING_INDICATOR_HTML: passed to gr.mount_gradio_app(css=...).
-TYPING_INDICATOR_CSS = """
-.typing-indicator { display: inline-flex; gap: 4px; padding: 4px 0; }
-.typing-indicator span {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: currentColor; opacity: 0.4;
-    animation: chatty-typing-bounce 1.4s infinite ease-in-out both;
-}
-.typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
-.typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
-@keyframes chatty-typing-bounce {
-    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-    40% { transform: scale(1); opacity: 1; }
-}
-.typing-indicator .typing-timer {
-    width: auto; height: auto; border-radius: 0;
-    background: none; animation: none;
-    margin-left: 6px; align-self: center;
-    font-size: 12px; opacity: 0.6;
-}
-"""
-
-# Client-side chat UI behavior, wired via the Blocks .load(js=...) event so
-# it runs once per page load. Two jobs:
-#
-# 1. Smart scrolling (replaces Gradio's built-in autoscroll, which runs two
-#    overlapping mechanisms with different "user scrolled up" thresholds --
-#    a token arriving inside the gap yanks the view back down, which reads
-#    as "a pending answer blocks the scroll"). One deterministic rule:
-#    follow the newest content only while the user is already near the
-#    bottom; the moment they scroll up, stop fighting them; pressing Enter
-#    (sending a message) resumes following.
-#
-# 2. A visible elapsed timer next to the typing dots while the answer is
-#    pending. Gradio's status tracker cannot serve this role: it hides
-#    itself as soon as the event starts streaming (and the typing-indicator
-#    yield makes the chat stream immediately), so no built-in progress
-#    setting produces a visible chat timer. This one renders in exactly
-#    one place -- inside the pending answer bubble -- counts up until the
-#    first real text replaces the dots, and removes itself then.
-#
-# Targets the chatbot's scroll container (div.bubble-wrap, verified in
-# gradio 6.28's rendered DOM).
-CHAT_UI_JS = """(function () {
-    var following = true;
-    var NEAR_BOTTOM_PX = 80;
-    function nearBottom(el) {
-        return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
-    }
-    function install(el) {
-        el.addEventListener('scroll', function () {
-            following = nearBottom(el);
-        }, { passive: true });
-        var box = document.querySelector('textarea[data-testid="textbox"]');
-        if (box) {
-            box.addEventListener('keydown', function (event) {
-                if (event.key === 'Enter') { following = true; }
-            });
-        }
-        var observer = new MutationObserver(function () {
-            manageTimer(el);
-            if (following) { el.scrollTop = el.scrollHeight; }
-        });
-        observer.observe(el, { childList: true, subtree: true, characterData: true });
-        if (following) { el.scrollTop = el.scrollHeight; }
-    }
-    var timerInterval = null;
-    var timerSeconds = 0;
-    var timerSpan = null;
-    function stopTimer() {
-        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-        timerSpan = null;
-        timerSeconds = 0;
-    }
-    function manageTimer(el) {
-        var dots = el.querySelector('.typing-indicator');
-        if (!dots) {
-            if (timerInterval) { stopTimer(); }
-            return;
-        }
-        if (!timerInterval) {
-            timerSeconds = 0;
-            timerSpan = document.createElement('span');
-            timerSpan.className = 'typing-timer';
-            timerSpan.textContent = '0s';
-            dots.appendChild(timerSpan);
-            timerInterval = setInterval(function () {
-                timerSeconds += 1;
-                var current = el.querySelector('.typing-indicator .typing-timer');
-                if (!current) { stopTimer(); return; }
-                current.textContent = timerSeconds + 's';
-            }, 1000);
-        }
-    }
-    function start() {
-        var el = document.querySelector('div.bubble-wrap');
-        if (el) { install(el); return; }
-        // The chatbot hydrates after the initial render; poll briefly.
-        var tries = 0;
-        var timer = setInterval(function () {
-            var found = document.querySelector('div.bubble-wrap');
-            if (found) { clearInterval(timer); install(found); }
-            else if (++tries > 40) { clearInterval(timer); }
-        }, 250);
-    }
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', start);
-    } else {
-        start();
-    }
-})();"""
 
 
 def build_ollama_client(host: str, timeout: float) -> Any:
@@ -186,6 +66,28 @@ class DriveSyncGate:
         """Release the gate after a sync completes (success or failure)."""
         self._last_finished = time.time()
         self._lock.release()
+
+
+class StopEvents:
+    """Registry of per-user stop Events so one session's Stop can't cancel
+    another user's in-flight stream. The Gradio variant kept a per-session
+    `state` dict holding an Event; the API is stateless per request, so the
+    Event is keyed by the (few, allowlisted) session user instead. Each
+    stream clears its Event on begin, so a stale Stop left over from an
+    already-finished answer is a no-op."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._events: Dict[str, threading.Event] = {}
+
+    def event_for(self, key: Optional[str]) -> threading.Event:
+        key = key or "anonymous"
+        with self._lock:
+            event = self._events.get(key)
+            if event is None:
+                event = threading.Event()
+                self._events[key] = event
+            return event
 
 
 def is_model_loaded(client: Any, model: str, min_ctx: Optional[int] = None) -> Optional[bool]:
@@ -372,26 +274,31 @@ def format_context_chunks(chunks: List[Tuple[str, Optional[Dict[str, Any]]]]) ->
     return "\n\n".join(f"[{format_source_label(meta)}]\n{text}" for text, meta in chunks)
 
 
-def build_sources_footer(chunks: List[Tuple[str, Optional[Dict[str, Any]]]]) -> Optional[str]:
-    """Render the "Sources:" line shown under a content-search answer, from
-    the documents that were actually fed to the model. The user deserves to
-    see *which* files answered; the model's self-narration is not reliable
-    enough. Returns None when nothing was retrieved (an empty "Sources:"
-    footer would just be noise) -- the answer should say so itself.
-    """
-    if not chunks:
-        return None
+def collect_source_labels(chunks: List[Tuple[str, Optional[Dict[str, Any]]]]) -> List[str]:
+    """Unique citation labels (in retrieval order) for the documents behind
+    a set of retrieved chunks."""
     labels: List[str] = []
     for _text, meta in chunks:
         label = format_source_label(meta)
         if label not in labels:
             labels.append(label)
-    shown = " · ".join(html.escape(label) for label in labels[:8])
-    more = f" · … ({len(labels)} total)" if len(labels) > 8 else ""
-    return f'<div class="chatty-sources">Sources: {shown}{more}</div>'
+    return labels
 
 
-def build_catalog_sources_footer(docs: List[Dict[str, Any]]) -> str:
+def content_sources_payload(chunks: List[Tuple[str, Optional[Dict[str, Any]]]]) -> Optional[Dict[str, Any]]:
+    """Structured 'Sources' footer data for content-search answers, from the
+    documents actually fed to the model. The user deserves to see *which*
+    files answered; the model's self-narration is not reliable enough.
+    Returns None when nothing was retrieved (an empty footer would be noise)
+    -- the answer should say so itself.
+    """
+    labels = collect_source_labels(chunks)
+    if not labels:
+        return None
+    return {"kind": "content", "labels": labels, "total": len(labels)}
+
+
+def catalog_sources_payload(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Footer for metadata-catalog answers ("list all PDFs"). Those are
     answered from index metadata rather than a content search -- that's the
     fact users should see, or a list they can't reconcile with the corpus
@@ -401,25 +308,18 @@ def build_catalog_sources_footer(docs: List[Dict[str, Any]]) -> str:
         label = format_source_label(doc)
         if label not in labels:
             labels.append(label)
-    shown = " · ".join(html.escape(label) for label in labels[:8]) or "(none)"
-    more = f" · … ({len(labels)} total)" if len(labels) > 8 else ""
-    return (
-        f'<div class="chatty-sources">Source: index metadata '
-        f"({len(docs)} document(s), not a content search) — {shown}{more}</div>"
-    )
+    return {"kind": "catalog", "labels": labels, "documents": len(docs)}
 
 
-def error_bubble(message: str) -> str:
-    """Wrap failure text so it reads as a failure, not as an answer.
-    `message` must be app-generated text (safe_error_message, validation
-    errors) -- it is embedded verbatim, the same channel the typing
-    indicator uses, which Gradio 6 renders as HTML in message content."""
-    return f'<div class="chatty-error">⚠ {message}</div>'
-
-
-def stopped_html() -> str:
-    """Footer line for an answer the user stopped mid-stream."""
-    return '<div class="chatty-stopped">⏹ Stopped</div>'
+def build_suggestions(sources: Optional[List[str]], limit: int = 4) -> List[str]:
+    """Example questions for the chat's welcome state. The first couple are
+    generated from real indexed document names (clicking one asks about a
+    file that actually exists instead of a placeholder), the rest are
+    generic catalog questions that work on any corpus."""
+    out = [f'What\u2019s in "{name}"?' for name in (sources or [])[:2]]
+    out.append("List all PDFs")
+    out.append("What documents are shared with me?")
+    return out[:limit]
 
 
 # Maps a "category" keyword to the mimeTypes/extensions that belong to it, so
@@ -798,21 +698,6 @@ def with_retries(
             )
             time.sleep(sleep_for)
     raise last_exc
-
-
-# Shown as the only message in the chat window for a user with no history
-# yet. Without it, a first-time user stares at a blank window above a
-# textbox (the old "Ask about the README" era left nothing to explain what
-# Chatty is or what it can be asked).
-WELCOME_MESSAGE: Dict[str, str] = {
-    "role": "assistant",
-    "content": (
-        "**Chatty here.** Ask about anything in your documents -- "
-        "everything from Google Drive and your uploads is searchable.\n\n"
-        "Try: *What covers my Kona trip?* · *List all PDFs* · "
-        "*Who shared the Q3 report with me?*"
-    ),
-}
 
 
 def drive_sync_timestamp_path() -> str:

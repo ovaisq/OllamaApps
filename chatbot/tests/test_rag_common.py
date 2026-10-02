@@ -147,15 +147,34 @@ def test_system_prompt_treats_user_corrections_as_authoritative():
     assert "override" in rag_common.CHAT_SYSTEM_PROMPT
 
 
-def test_chat_ui_js_renders_a_visible_elapsed_timer():
-    """Gradio's status tracker cannot be the chat timer -- it hides itself
-    as soon as an event starts streaming, and the typing-indicator yield
-    makes the chat stream immediately (verified against the 6.28
-    statustracker bundle; show_progress settings can't produce a visible
-    chat timer). The UI JS must render its own: an elapsed counter next to
-    the typing dots while the answer is pending."""
-    assert "typing-timer" in rag_common.CHAT_UI_JS
-    assert "typing-timer" in rag_common.TYPING_INDICATOR_CSS
+def test_web_ui_renders_a_visible_elapsed_timer():
+    """Gradio's status tracker could not be the chat timer (it hides itself
+    as soon as an event starts streaming), so the custom web UI renders its
+    own: an elapsed counter next to the typing dots while the answer is
+    pending. Both the JS counter and the CSS for the dots/timer must exist,
+    or the pending state reads as frozen."""
+    from pathlib import Path
+
+    static = Path(__file__).parent.parent / "static"
+    app_js = (static / "app.js").read_text()
+    styles = (static / "styles.css").read_text()
+
+    assert "typing-timer" in app_js        # JS renders the seconds counter
+    assert "typing-indicator" in styles    # CSS styles the bouncing dots
+    assert "typing-timer" in styles        # CSS styles the timer
+
+
+def test_web_ui_has_no_page_scroll_and_sticky_composer():
+    """The old Gradio layout was a fixed 520px chatbox inside a scrolling
+    page. The web UI must be one full-height shell: the body does not
+    scroll, the message list owns the scroll, and the composer is pinned
+    below it (flex column, overflow hidden)."""
+    from pathlib import Path
+
+    styles = (Path(__file__).parent.parent / "static" / "styles.css").read_text()
+    assert "overflow: hidden" in styles           # body: no page scroll
+    assert ".messages" in styles and "overflow-y: auto" in styles
+    assert ".composer" in styles and "flex: none" in styles
 
 
 def test_detect_mentioned_sources_routes_named_documents():
@@ -345,3 +364,69 @@ def test_extract_text_from_upload_dispatches_word_files(tmp_path, monkeypatch):
     doc = tmp_path / "legacy.doc"
     doc.write_bytes(b"legacy body")
     assert rag_common.extract_text_from_upload(str(doc)) == "legacy body"
+
+
+# ------------------------------------------------- web-UI data contracts
+
+
+def test_collect_source_labels_dedupes_in_retrieval_order():
+    chunks = [
+        ("a", {"source": "two.md", "owner": "Jane"}),
+        ("b", {"source": "one.md"}),
+        ("c", {"source": "two.md", "owner": "Jane"}),  # dupe, dropped
+    ]
+    assert rag_common.collect_source_labels(chunks) == [
+        "two.md | owner: Jane", "one.md",
+    ]
+
+
+def test_content_sources_payload_is_none_when_nothing_retrieved():
+    """An empty 'Sources:' footer is noise -- the answer should say the
+    index had nothing relevant instead. So no chunks -> no payload."""
+    assert rag_common.content_sources_payload([]) is None
+    payload = rag_common.content_sources_payload(
+        [("x", {"source": "doc.md"}), ("y", {"source": "doc.md"})]
+    )
+    assert payload == {"kind": "content", "labels": ["doc.md"], "total": 1}
+
+
+def test_catalog_sources_payload_reports_document_count():
+    docs = [{"source": "a.pdf"}, {"source": "a.pdf"}]
+    assert rag_common.catalog_sources_payload(docs) == {
+        "kind": "catalog", "labels": ["a.pdf"], "documents": 2,
+    }
+    assert rag_common.catalog_sources_payload([]) == {
+        "kind": "catalog", "labels": [], "documents": 0,
+    }
+
+
+def test_build_suggestions_leads_with_real_documents():
+    """Welcome chips should name documents that actually exist in the index
+    (a click asks about a real file), then fall back to generic questions
+    that work on any corpus; capped at `limit`."""
+    sugg = rag_common.build_suggestions(["Kona April 2026", "bq-results", "x"])
+    assert sugg[0].startswith("What") and "Kona April 2026" in sugg[0]
+    assert "bq-results" in sugg[1]
+    assert "List all PDFs" in sugg
+    assert "What documents are shared with me?" in sugg
+
+    # No corpus yet: only the generic questions (nothing to name).
+    assert rag_common.build_suggestions([]) == [
+        "List all PDFs", "What documents are shared with me?",
+    ]
+    assert len(rag_common.build_suggestions(["a", "b", "c", "d"], limit=3)) == 3
+
+
+def test_stop_events_reuses_per_user_and_isolates_others():
+    """One stop Event per signed-in user (reused across turns so a stale
+    stop is just cleared on begin, not leaked), and stopping one user must
+    not cancel another user's stream. Unknown/None user share one bucket."""
+    reg = rag_common.StopEvents()
+
+    assert reg.event_for("a@x.com") is reg.event_for("a@x.com")
+    assert reg.event_for("a@x.com") is not reg.event_for("b@x.com")
+    assert reg.event_for(None) is reg.event_for(None)
+    assert reg.event_for(None) is not reg.event_for("a@x.com")
+
+    reg.event_for("a@x.com").set()
+    assert reg.event_for("b@x.com").is_set() is False

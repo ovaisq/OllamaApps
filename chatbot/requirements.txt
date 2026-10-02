@@ -1,5 +1,4 @@
 ollama==0.6.2
-gradio==6.28.0
 chromadb==1.5.9
 langchain-text-splitters==1.1.2
 psycopg2-binary==2.9.13
@@ -8,3 +7,6 @@ httpx==0.28.1
 pypdf==6.19.0
 PyJWT==2.15.1
 openpyxl==3.1.5
+fastapi
+python-multipart
+uvicorn

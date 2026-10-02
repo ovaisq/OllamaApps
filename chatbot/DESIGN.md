@@ -1,8 +1,18 @@
-# Chatty — UI/UX Redesign Spec
+# Chatty — UI/UX Redesign Spec (v1, Gradio — superseded)
+
+> **Status: Superseded.** This spec documents the v1 Gradio redesign and was
+> implemented 2026-09-29. On 2026-10-02 the Gradio front-end was replaced
+> wholesale: the chat UI is now a hand-built single page in `static/`
+> (vanilla JS + vendored marked/DOMPurify, no build step), served by
+> `api_routes.py` (JSON + SSE over FastAPI) with `library.py` handlers.
+> `admin_ui.py`/`ui_common.py` were deleted, `gradio` dropped from
+> `requirements.txt`, and the Google-OAuth gate (`auth_routes.py`) plus both
+> RAG backends are unchanged. The event protocol and behaviors specified
+> below were carried over 1:1 to the SSE/JSON surface.
 
 Status: **Implemented** (P0 + P1 + P2, 2026-09-29 — 162 tests passing, incl. new
 coverage for every redesigned behavior)
-Scope: `chatbot/` — `chromadb_chatty.py`, `pgv_chatty.py`, `admin_ui.py`, `auth_routes.py`, `rag_common.py`, new `ui_common.py`
+Scope (as built): `chatbot/` — `chromadb_chatty.py`, `pgv_chatty.py`, `admin_ui.py`, `auth_routes.py`, `rag_common.py`, new `ui_common.py`
 Companion to: `AGENTS.md` (repo conventions)
 
 As-implemented deltas (all forced by the Gradio 6.28 API or better behavior):

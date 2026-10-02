@@ -7,7 +7,9 @@ Guidelines for AI agents working on this OllamaApps codebase.
 This is a monorepo of locally-hosted AI applications using Ollama for LLM inference.
 
 **Projects:**
-- `chatbot/` - Markdown chatbot (ChromaDB + pgvector variants)
+- `chatbot/` - Markdown RAG chatbot (ChromaDB + pgvector variants); custom
+  vanilla-JS web UI in `static/` served by a FastAPI JSON/SSE API
+  (`api_routes.py`) — no Gradio, no build step
 - `CodeReviewAssistant/` - Gradio-based code review UI
 - `codey/` - Command-line code review tool
 - `embedding/` - Web document Q&A with PostgreSQL/pgvector
@@ -26,8 +28,11 @@ cd embedding && python3 ui.py
 # Code Review UI
 cd CodeReviewAssistant && python3 ui.py
 
-# Chatbot
+# Chatbot (ChromaDB backend)
 cd chatbot && python3 chromadb_chatty.py
+
+# Chatbot (PostgreSQL/pgvector backend)
+cd chatbot && python3 pgv_chatty.py
 ```
 
 **Lint with Ruff:**
@@ -170,7 +175,8 @@ logger = logging.getLogger(__name__)
 
 Common dependencies across projects:
 - `ollama` - Official Ollama Python SDK
-- `gradio` - Web UI framework
+- `gradio` - Web UI framework (CodeReviewAssistant, embedding — chatbot moved to a hand-built UI on `fastapi`)
+- `fastapi` / `uvicorn` / `python-multipart` - chatbot JSON+SSE API and ASGI server
 - `chromadb` - Vector database
 - `psycopg2-binary` - PostgreSQL adapter
 - `langchain*` - LLM framework components
@@ -205,6 +211,7 @@ pip3 install -r requirements.txt
 ## Notes
 
 - **Python 3.8+** required
-- **No formal tests:** Manual testing required
+- **Tests:** `chatbot/` has a `pytest tests/` suite (no CI); other subprojects
+  rely on manual testing
 - **No CI/CD:** Direct commits to main
 - Each subproject has independent requirements.txt

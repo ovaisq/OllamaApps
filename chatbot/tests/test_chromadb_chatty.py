@@ -1,3 +1,13 @@
+"""Tests for the ChromaDB backend class (ChromaChat).
+
+The chat-turn *orchestration* (validate -> prepare -> stream -> persist, plus
+error/stopped classification) is backend-agnostic and lives in
+api_routes.chat_stream_events -- it is tested once in test_api_routes.py,
+not duplicated here. What remains class-specific and is tested here: the
+retrieval logic, prepare_turn (RAG prompt + structured sources payload),
+stream_answer (Ollama call params + empty-first-chunk handling), and the
+Chroma/SQLite persistence layer.
+"""
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,14 +24,17 @@ def chat(tmp_path):
     with patch("chromadb_chatty.build_ollama_client", return_value=mock_ollama_client), \
          patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls, \
          patch(
-             "chromadb_chatty.CHROMA_CONFIG",
-             {**chromadb_chatty.CHROMA_CONFIG, "db_path": str(tmp_path / "chroma_db")},
-         ):
+              "chromadb_chatty.CHROMA_CONFIG",
+              {**chromadb_chatty.CHROMA_CONFIG, "db_path": str(tmp_path / "chroma_db")},
+          ):
         mock_collection = MagicMock()
         mock_chroma_cls.return_value.get_collection.return_value = mock_collection
         instance = chromadb_chatty.ChromaChat()
     instance._stop_reload.set()  # stop the background reloader thread for the test
     return instance, mock_collection, mock_ollama_client
+
+
+# ----------------------------------------------------------------- retrieval
 
 
 def test_retrieve_context_embeds_query_before_similarity_search(chat):
@@ -56,14 +69,6 @@ def test_retrieve_context_filters_out_irrelevant_matches_when_threshold_set(chat
     assert result == [("close match", {"source": "doc_a.md"})]
 
 
-def test_respond_rejects_oversized_message_without_calling_llm(chat):
-    instance, _collection, ollama_client = chat
-    outputs = list(instance.respond("x" * 100000, [], {}))
-
-    ollama_client.chat.assert_not_called()
-    assert "exceeds" in outputs[-1][0][-1]["content"]
-
-
 def test_embedding_call_keeps_model_loaded(chat):
     """Embedding calls must pass keep_alive=-1 too -- without it each call
     resets the embedding model's unload timer to the server's 5-minute
@@ -75,173 +80,6 @@ def test_embedding_call_keeps_model_loaded(chat):
     instance.retrieve_context("query")
 
     assert ollama_client.embeddings.call_args.kwargs["keep_alive"] == -1
-
-
-def test_chat_uses_configured_context_window_and_keep_alive(chat):
-    """Chat must send the configured num_ctx -- a smaller window (the old
-    hardcoded 8192) forces a full reload of a model running with 256K --
-    and keep_alive=-1 so no request resets the unload timer."""
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
-    ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
-
-    list(instance.get_answer_stream("hello", [], MagicMock(is_set=lambda: False)))
-
-    kwargs = ollama_client.chat.call_args.kwargs
-    assert kwargs["options"]["num_ctx"] == chromadb_chatty.OLLAMA_CONFIG["num_ctx"]
-    assert kwargs["options"]["num_ctx"] == 262144
-    assert kwargs["keep_alive"] == -1
-
-
-def test_construction_prewarms_only_models_not_already_running(tmp_path):
-    """Startup prewarm must check /api/ps first: an already-running model
-    with a sufficient context window is left untouched (a redundant load
-    request with different options would force a reload), while a
-    not-running one is preloaded with keep_alive so it stays resident."""
-    mock_ollama = MagicMock()
-    chat_running = MagicMock(
-        model=chromadb_chatty.OLLAMA_CONFIG["chat_model"],
-        context_length=chromadb_chatty.OLLAMA_CONFIG["num_ctx"],
-    )
-    mock_ollama.ps.return_value.models = [chat_running]
-
-    with patch("chromadb_chatty.build_ollama_client", return_value=mock_ollama), \
-         patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls, \
-         patch(
-            "chromadb_chatty.CHROMA_CONFIG",
-            {**chromadb_chatty.CHROMA_CONFIG, "db_path": str(tmp_path / "chroma_db")},
-         ):
-        mock_chroma_cls.return_value.get_collection.return_value = MagicMock()
-        instance = chromadb_chatty.ChromaChat()
-    instance._stop_reload.set()
-
-    loaded_models = [c.kwargs["model"] for c in mock_ollama.generate.call_args_list]
-    assert loaded_models == [chromadb_chatty.OLLAMA_CONFIG["embedding_model"]]
-    load_call = mock_ollama.generate.call_args.kwargs
-    assert load_call["keep_alive"] == chromadb_chatty.OLLAMA_CONFIG["keep_alive"]
-    # Embedding model gets its own default window, not the chat model's.
-    assert load_call["options"] is None
-
-
-def test_sync_drive_rejects_concurrent_triggers(chat):
-    """A second Drive sync trigger while one is running must be rejected
-    (-1) -- it would spawn a second concurrent embed worker pool re-embedding
-    the same corpus (a sync storm)."""
-    instance, _collection, _ollama_client = chat
-    assert instance._sync_gate.try_begin() is True  # simulate a running sync
-
-    assert instance.sync_drive() == -1
-
-    instance._sync_gate.finish()
-
-
-def test_sync_drive_runs_when_idle_and_records_the_sync_time(chat):
-    instance, _collection, _ollama_client = chat
-    with patch("gdrive_indexer.get_access_token", return_value="token"), \
-         patch("gdrive_indexer.run_chromadb_backend", return_value=42) as run, \
-         patch("chromadb_chatty.record_drive_sync_timestamp") as record:
-        assert instance.sync_drive() == 42
-
-    run.assert_called_once_with("token")
-    # A successful sync stamps the 'Drive synced 2 h ago' timestamp;
-    # blocked syncs (-1 path, other test) and failures never do.
-    record.assert_called_once()
-
-
-def test_scroll_follows_output_only_while_user_is_at_bottom(chat):
-    """Gradio's built-in autoscroll yanks the view to the bottom on every
-    streamed token inside its threshold gap -- users read it as "a pending
-    answer blocks the scroll". The app must disable it and wire
-    SMART_SCROLL_JS instead, which follows only while the user is already
-    at the bottom."""
-    instance, _collection, _ollama_client = chat
-    app = chromadb_chatty.build_app(instance)
-
-    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
-    config = mount.app.blocks.config
-    chatbots = [c for c in config["components"] if c.get("type") == "chatbot"]
-    assert chatbots, "no chatbot component in the built app"
-    assert all(c["props"].get("autoscroll") is False for c in chatbots)
-    assert any(
-        "bubble-wrap" in (d.get("js") or "") for d in config["dependencies"]
-    ), "SMART_SCROLL_JS is not wired to the load event"
-
-
-def test_like_dislike_is_recorded_with_its_question(chat):
-    """Like/Dislike on an answer must persist the answer AND the question it
-    answered, into the real (tmp-dir) sqlite store."""
-    instance, collection, _ollama_client = chat
-    like_data = MagicMock(index=1, liked=False)
-    history = [
-        {"role": "user", "content": "the question"},
-        {"role": "assistant", "content": "the wrong answer"},
-    ]
-
-    instance.record_feedback(history, like_data)
-
-    import sqlite3
-    with sqlite3.connect(instance._history_db_path) as conn:
-        rows = conn.execute(
-            "SELECT user_email, question, answer, rating FROM feedback"
-        ).fetchall()
-    assert rows == [("anonymous", "the question", "the wrong answer", "dislike")]
-
-
-def test_record_feedback_never_raises(chat):
-    """A Like/Dislike click must never break the chat, even with junk
-    event data."""
-    instance, _collection, _ollama_client = chat
-    like_data = MagicMock()
-    like_data.index = MagicMock(side_effect=TypeError("bad event data"))
-
-    instance.record_feedback([{"role": "assistant", "content": "x"}], like_data)
-
-
-def test_like_event_is_wired_to_feedback_recording(chat):
-    instance, _collection, _ollama_client = chat
-    app = chromadb_chatty.build_app(instance)
-
-    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
-    config = mount.app.blocks.config
-    assert any(
-        any(isinstance(t, (list, tuple)) and t[1] == "like" for t in d.get("targets", []))
-        for d in config["dependencies"]
-    ), "the chatbot's like event is not wired to feedback recording"
-
-
-def test_stream_keeps_typing_indicator_until_real_text(chat):
-    """Ollama's first chunk is role-only (empty content). Yielding it
-    replaced the typing dots with an empty bubble that sat on screen for
-    the whole prefill window -- the confusing dots, then empty, then
-    answer sequence users reported."""
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
-    ollama_client.chat.return_value = iter([
-        {"message": {"content": ""}},
-        {"message": {"content": "Hello"}},
-        {"message": {"content": " world"}},
-    ])
-
-    parts = list(instance.get_answer_stream("hi", [], MagicMock(is_set=lambda: False)))
-
-    assert parts == ["Hello", "Hello world"]
-
-
-def test_stream_with_no_text_yields_placeholder_not_frozen_dots(chat):
-    """If the stream never produces text (stopped early, or the model
-    returned nothing), the typing dots must not be left frozen on
-    screen."""
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
-    ollama_client.chat.return_value = iter([{"message": {"content": ""}}])
-
-    outputs = list(instance.respond("hello", [], {}))
-
-    assert "typing-indicator" in outputs[0][0][-1]["content"]
-    assert "no response content" in outputs[-1][0][-1]["content"]
 
 
 def test_named_documents_are_routed_to_the_front_of_retrieval(chat):
@@ -269,51 +107,121 @@ def test_named_documents_are_routed_to_the_front_of_retrieval(chat):
     assert routed_call.kwargs["where"] == {"source": {"$eq": "Kona April 2026"}}
 
 
-def test_progress_timer_shows_in_one_place(chat):
-    """Gradio's default ('full' with no show_progress_on) renders the
-    runtime timer on EVERY output component -- chat submit has two outputs
-    (chatbot + textbox), so users saw two timers. 'minimal' hides the
-    trackers entirely (zero timers, verified against the 6.28 statustracker
-    bundle). One timer = 'full' scoped to a single component via
-    show_progress_on; quick UI actions must be 'hidden'."""
+# -------------------------------------------------------------- prepare_turn
+
+
+def test_prepare_turn_builds_content_sources_payload(chat):
+    """A content question retrieves chunks and returns a structured Sources
+    payload (the documents that actually fed the model) alongside the prompt
+    messages -- the web UI renders those as the under-answer footer."""
     instance, collection, ollama_client = chat
-    app = chromadb_chatty.build_app(instance)
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {
+        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
+    }
 
-    mount = next(r for r in app.routes if type(r).__name__ == "Mount")
-    config = mount.app.blocks.config
-    deps = config["dependencies"]
-    chatbot_ids = {c["id"] for c in config["components"] if c.get("type") == "chatbot"}
+    _messages, sources = instance.prepare_turn("hello", [])
 
-    submit_dep = next(
-        d for d in deps
-        if any(isinstance(t, (list, tuple)) and t[1] == "submit" for t in d["targets"])
+    assert sources["kind"] == "content"
+    assert "doc.md" in sources["labels"]
+    assert sources["total"] == 1
+
+
+def test_prepare_turn_routes_catalog_queries_away_from_embedding_search(chat):
+    """"Show me all documents shared by Jen" must not trigger an embedding
+    call / vector search -- it's a metadata enumeration, not a content
+    question, and top-k similarity search can't answer it completely. The
+    catalog payload carries the matching documents."""
+    instance, collection, ollama_client = chat
+    collection.get.return_value = {
+        "metadatas": [{"source": "Engineering Reports", "owner": "Jane", "shared_by": "Jen"}]
+    }
+
+    messages, sources = instance.prepare_turn("Show me all documents shared by Jen", [])
+
+    ollama_client.embeddings.assert_not_called()
+    assert sources["kind"] == "catalog"
+    assert any("Engineering Reports" in label for label in sources["labels"])
+    assert sources["documents"] == 1
+    # The catalog text is what the model turns into a natural-language list.
+    assert "Engineering Reports" in messages[1]["content"]
+
+
+# ------------------------------------------------------------- stream_answer
+
+
+def test_chat_uses_configured_context_window_and_keep_alive(chat):
+    """Chat must send the configured num_ctx -- a smaller window (the old
+    hardcoded 8192) forces a full reload of a model running with 256K --
+    and keep_alive=-1 so no request resets the unload timer."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
+    ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
+
+    messages, _sources = instance.prepare_turn("hello", [])
+    list(instance.stream_answer(messages, MagicMock(is_set=lambda: False)))
+
+    kwargs = ollama_client.chat.call_args.kwargs
+    assert kwargs["options"]["num_ctx"] == chromadb_chatty.OLLAMA_CONFIG["num_ctx"]
+    assert kwargs["options"]["num_ctx"] == 262144
+    assert kwargs["keep_alive"] == -1
+
+
+def test_stream_answer_skips_empty_first_chunk(chat):
+    """Ollama's first chunk is role-only (empty content). Yielding it
+    replaced the typing dots with an empty bubble that sat on screen for the
+    whole prefill window -- the confusing dots, then empty, then answer
+    sequence users reported. The stream must yield only real text."""
+    instance, collection, ollama_client = chat
+    ollama_client.embeddings.return_value = {"embedding": [0.1]}
+    collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
+    ollama_client.chat.return_value = iter([
+        {"message": {"content": ""}},
+        {"message": {"content": "Hello"}},
+        {"message": {"content": " world"}},
+    ])
+
+    messages, _sources = instance.prepare_turn("hi", [])
+    parts = list(instance.stream_answer(messages, MagicMock(is_set=lambda: False)))
+
+    assert parts == ["Hello", "Hello world"]
+
+
+# --------------------------------------------------------------- construction
+
+
+def test_construction_prewarms_only_models_not_already_running(tmp_path):
+    """Startup prewarm must check /api/ps first: an already-running model
+    with a sufficient context window is left untouched (a redundant load
+    request with different options would force a reload), while a
+    not-running one is preloaded with keep_alive so it stays resident."""
+    mock_ollama = MagicMock()
+    chat_running = MagicMock(
+        model=chromadb_chatty.OLLAMA_CONFIG["chat_model"],
+        context_length=chromadb_chatty.OLLAMA_CONFIG["num_ctx"],
     )
-    assert submit_dep["show_progress"] == "full"
-    assert set(submit_dep["show_progress_on"]) == chatbot_ids, (
-        "the chat timer must be scoped to the chatbot only, not every output"
-    )
-    like_dep = next(
-        d for d in deps
-        if any(isinstance(t, (list, tuple)) and t[1] == "like" for t in d["targets"])
-    )
-    assert like_dep["show_progress"] == "hidden"
-    for d in deps:
-        if d["show_progress"] == "full":
-            assert len(d["show_progress_on"]) == 1, (
-                "'full' without a single show_progress_on target renders "
-                "one timer per output component (duplicates)"
-            )
+    mock_ollama.ps.return_value.models = [chat_running]
+
+    with patch("chromadb_chatty.build_ollama_client", return_value=mock_ollama), \
+         patch("chromadb_chatty.chromadb.PersistentClient") as mock_chroma_cls, \
+         patch(
+             "chromadb_chatty.CHROMA_CONFIG",
+             {**chromadb_chatty.CHROMA_CONFIG, "db_path": str(tmp_path / "chroma_db")},
+          ):
+        mock_chroma_cls.return_value.get_collection.return_value = MagicMock()
+        instance = chromadb_chatty.ChromaChat()
+    instance._stop_reload.set()
+
+    loaded_models = [c.kwargs["model"] for c in mock_ollama.generate.call_args_list]
+    assert loaded_models == [chromadb_chatty.OLLAMA_CONFIG["embedding_model"]]
+    load_call = mock_ollama.generate.call_args.kwargs
+    assert load_call["keep_alive"] == chromadb_chatty.OLLAMA_CONFIG["keep_alive"]
+    # Embedding model gets its own default window, not the chat model's.
+    assert load_call["options"] is None
 
 
-def test_respond_hides_internal_error_details_from_user(chat):
-    instance, _collection, ollama_client = chat
-    ollama_client.embeddings.side_effect = ConnectionError("db-password=hunter2 leaked")
-
-    outputs = list(instance.respond("hello", [], {}))
-
-    final_message = outputs[-1][0][-1]["content"]
-    assert "hunter2" not in final_message
-    assert "error id" in final_message
+# ---------------------------------------------------------------- list_docs
 
 
 def test_list_documents_filters_by_person_across_owner_and_shared_by(chat):
@@ -343,7 +251,6 @@ def test_list_documents_filters_by_category(chat):
     }
 
     docs = instance.list_documents(category="pdf")
-
     assert [d["source"] for d in docs] == ["report.pdf"]
 
 
@@ -355,26 +262,16 @@ def test_list_documents_dedupes_by_source(chat):
             {"source": "report.pdf", "mime_type": "application/pdf"},
         ]
     }
-
-    docs = instance.list_documents()
-    assert len(docs) == 1
+    assert len(instance.list_documents()) == 1
 
 
-def test_get_answer_stream_routes_catalog_queries_away_from_embedding_search(chat):
-    instance, collection, ollama_client = chat
-    collection.get.return_value = {
-        "metadatas": [{"source": "Engineering Reports", "owner": "Jane", "shared_by": "Jen"}]
-    }
-    ollama_client.chat.return_value = iter([{"message": {"content": "Found it"}}])
-
-    list(instance.get_answer_stream("Show me all documents shared by Jen", [], MagicMock(is_set=lambda: False)))
-
-    ollama_client.embeddings.assert_not_called()
-    messages = ollama_client.chat.call_args.kwargs["messages"]
-    assert "Engineering Reports" in messages[1]["content"]
+# ------------------------------------------------------------------- history
 
 
-def test_save_and_load_history_round_trips(chat):
+def test_save_and_load_history_round_trips_including_created_at(chat):
+    """The web UI shows a timestamp per message, so load_history must pass
+    created_at through (normalized to ISO-8601 UTC) in addition to
+    role/content."""
     instance, _collection, _ollama_client = chat
     instance.save_message("user@example.com", "user", "hi")
     instance.save_message("user@example.com", "assistant", "hello there")
@@ -382,10 +279,10 @@ def test_save_and_load_history_round_trips(chat):
 
     history = instance.load_history("user@example.com")
 
-    assert history == [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello there"},
+    assert [(m["role"], m["content"]) for m in history] == [
+        ("user", "hi"), ("assistant", "hello there"),
     ]
+    assert all(m["created_at"] for m in history)
 
 
 def test_clear_history_only_clears_that_user(chat):
@@ -396,99 +293,50 @@ def test_clear_history_only_clears_that_user(chat):
     instance.clear_history("user@example.com")
 
     assert instance.load_history("user@example.com") == []
-    assert instance.load_history("someone-else@example.com") == [{"role": "user", "content": "keep me"}]
-
-
-def test_respond_persists_messages_for_identified_user(chat):
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {
-        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
-    }
-    ollama_client.chat.return_value = iter([{"message": {"content": "hi there"}}])
-
-    with patch("chromadb_chatty.get_email_from_request", return_value="user@example.com"):
-        list(instance.respond("hello", [], {}, request=MagicMock()))
-
-    assert instance.load_history("user@example.com") == [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi there"},
+    assert [(m["role"], m["content"]) for m in instance.load_history("someone-else@example.com")] == [
+        ("user", "keep me"),
     ]
 
 
-def test_respond_skips_persistence_when_user_not_identified(chat):
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {
-        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
-    }
-    ollama_client.chat.return_value = iter([{"message": {"content": "hi"}}])
-
-    with patch("chromadb_chatty.get_email_from_request", return_value=None):
-        list(instance.respond("hello", [], {}))
-
-    assert instance.load_history("anyone@example.com") == []
+# ----------------------------------------------------------------- feedback
 
 
-def test_load_history_ui_returns_empty_for_unauthenticated_request(chat):
+def test_record_feedback_inserts_question_answer_and_rating(chat):
+    """Like/Dislike must persist the answer AND the question it answered
+    (the web UI sends both, so no index lookups) into the real (tmp-dir)
+    sqlite store."""
     instance, _collection, _ollama_client = chat
-    with patch("chromadb_chatty.get_email_from_request", return_value=None):
-        assert instance.load_history_ui(MagicMock()) == []
+    instance.record_feedback("user@example.com", "the question", "the wrong answer", "dislike")
+
+    import sqlite3
+    with sqlite3.connect(instance._history_db_path) as conn:
+        rows = conn.execute(
+            "SELECT user_email, question, answer, rating FROM feedback"
+        ).fetchall()
+    assert rows == [("user@example.com", "the question", "the wrong answer", "dislike")]
 
 
-def test_load_history_ui_shows_welcome_for_new_user(chat):
-    """A signed-in user with no history gets the welcome message instead of
-    a blank window (display-only, never persisted)."""
+def test_record_feedback_never_raises(chat):
+    """A feedback click must never break the chat, even if the DB is down."""
     instance, _collection, _ollama_client = chat
-    with patch("chromadb_chatty.get_email_from_request", return_value="user@example.com"):
-        history = instance.load_history_ui(MagicMock())
-
-    assert len(history) == 1
-    assert history[0]["role"] == "assistant"
-    assert "Chatty here" in history[0]["content"]
+    with patch.object(instance, "_history_connection", side_effect=RuntimeError("db down")):
+        instance.record_feedback("u@x.com", "q", "a", "dislike")
 
 
-def test_respond_appends_sources_footer_to_completed_answer(chat):
-    """A completed content-search answer shows which documents fed the
-    model -- the retrieval metadata used to be thrown away after building
-    the prompt."""
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {
-        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
-    }
-    ollama_client.chat.return_value = iter([{"message": {"content": "hi there"}}])
+def test_load_feedback_returns_only_this_users_dislikes(chat):
+    """The Library view's correction prefill lists dislikes only (likes are
+    fine, they're not things to correct)."""
+    instance, _collection, _ollama_client = chat
+    instance.record_feedback("anonymous", "the question", "the wrong answer", "dislike")
+    instance.record_feedback("anonymous", "the good question", "right answer", "like")
 
-    outputs = list(instance.respond("hello", [], {}))
+    rows = instance.load_feedback("anonymous")
 
-    final_content = outputs[-1][0][-1]["content"]
-    assert final_content.startswith("hi there")
-    assert "chatty-sources" in final_content
-    assert "doc.md" in final_content
+    assert [r["question"] for r in rows] == ["the question"]
+    assert rows[0]["answer"] == "the wrong answer"
 
 
-def test_respond_marks_a_user_stopped_answer(chat, monkeypatch):
-    """Stopping mid-stream keeps the partial text and appends a visible
-    Stopped marker -- not an error bubble, not frozen typing dots, and no
-    sources footer (the search was superseded)."""
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {
-        "documents": [["chunk"]], "metadatas": [[{"source": "doc.md"}]], "distances": [[0.1]],
-    }
-
-    def fake_stream(messages, stop_event):
-        yield "partial answer"
-        stop_event.set()
-
-    monkeypatch.setattr(instance, "_stream_answer", fake_stream)
-
-    outputs = list(instance.respond("hello", [], {}))
-
-    final_content = outputs[-1][0][-1]["content"]
-    assert final_content.startswith("partial answer")
-    assert "chatty-stopped" in final_content
-    assert "chatty-sources" not in final_content
+# --------------------------------------------------------------------- index
 
 
 def test_index_summary_counts_documents_and_top_sources(chat):
@@ -506,57 +354,29 @@ def test_index_summary_counts_documents_and_top_sources(chat):
     assert summary["last_sync"] is None
 
 
-def test_load_feedback_returns_only_this_users_dislikes(chat):
-    """The Library tab's correction prefill lists dislikes only (likes are
-    fine, they're not things to correct)."""
+# --------------------------------------------------------------------- drive
+
+
+def test_sync_drive_rejects_concurrent_triggers(chat):
+    """A second Drive sync trigger while one is running must be rejected
+    (-1) -- it would spawn a second concurrent embed worker pool re-embedding
+    the same corpus (a sync storm)."""
     instance, _collection, _ollama_client = chat
-    instance.record_feedback(
-        [{"role": "user", "content": "the question"},
-         {"role": "assistant", "content": "the wrong answer"}],
-        MagicMock(index=1, liked=False),
-    )
-    instance.record_feedback(
-        [{"role": "user", "content": "the good question"},
-         {"role": "assistant", "content": "right answer"}],
-        MagicMock(index=1, liked=True),
-    )
+    assert instance._sync_gate.try_begin() is True  # simulate a running sync
 
-    rows = instance.load_feedback("anonymous")
+    assert instance.sync_drive() == -1
 
-    assert [r["question"] for r in rows] == ["the question"]
-    assert rows[0]["answer"] == "the wrong answer"
+    instance._sync_gate.finish()
 
 
-def test_clear_chat_ui_clears_persisted_history_for_identified_user(chat):
+def test_sync_drive_runs_when_idle_and_records_the_sync_time(chat):
     instance, _collection, _ollama_client = chat
-    instance.save_message("user@example.com", "user", "hi")
+    with patch("gdrive_indexer.get_access_token", return_value="token"), \
+         patch("gdrive_indexer.run_chromadb_backend", return_value=42) as run, \
+         patch("chromadb_chatty.record_drive_sync_timestamp") as record:
+        assert instance.sync_drive() == 42
 
-    with patch("chromadb_chatty.get_email_from_request", return_value="user@example.com"):
-        result = instance.clear_chat_ui(MagicMock())
-
-    assert result == ([], "", {})
-    assert instance.load_history("user@example.com") == []
-
-
-def test_stop_chat_only_stops_its_own_session(chat):
-    instance, collection, ollama_client = chat
-    ollama_client.embeddings.return_value = {"embedding": [0.1]}
-    collection.query.return_value = {
-        "documents": [["chunk"]],
-        "metadatas": [[{"source": "doc.md"}]],
-        "distances": [[0.1]],
-    }
-    ollama_client.chat.return_value = iter(
-        [{"message": {"content": "hi"}}, {"message": {"content": " there"}}]
-    )
-
-    _, _, state_a = instance.stop_chat([], {})
-    assert state_a["stop_event"].is_set()
-
-    outputs = list(instance.respond("hello", [], {}))
-    # Session a's stop state must not leak in (the full answer arrived);
-    # the model text is intact and a Sources footer now follows it.
-    final_content = outputs[-1][0][-1]["content"]
-    assert final_content.startswith("hi there")
-    assert "chatty-sources" in final_content
-    assert "doc.md" in final_content
+    run.assert_called_once_with("token")
+    # A successful sync stamps the 'Drive synced 2 h ago' timestamp;
+    # blocked syncs (-1 path, other test) and failures never do.
+    record.assert_called_once()

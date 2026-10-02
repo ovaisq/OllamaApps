@@ -82,6 +82,42 @@ def test_protected_route_accessible_with_a_valid_allowlisted_session():
     assert resp.status_code == 200
 
 
+def test_auth_can_be_temporarily_disabled_for_lan_debug():
+    """The `auth_disabled` escape hatch (AUTH_DISABLED env, see
+    gdrive_config) makes the session gate pass everything through, so the app
+    is reachable on the LAN without a sign-in. Off by default; a temporary
+    debug measure, never left on behind a public endpoint."""
+    disabled_config = dict(TEST_AUTH_CONFIG, auth_disabled=True)
+    with patch("auth_routes.AUTH_CONFIG", disabled_config):
+        client = make_client()
+        # A protected route no longer redirects to /login.
+        assert client.get("/protected", follow_redirects=False).status_code == 200
+        # An API path the gate would normally 401 is now passed straight
+        # through to the router (404, not 401) -- proving the gate stood
+        # down rather than the route existing.
+        assert client.get("/api/anything", follow_redirects=False).status_code == 404
+
+
+def test_unauthenticated_api_calls_get_401_json_not_a_login_redirect():
+    """The web UI's fetch calls must get a machine-readable 401 (its JS
+    then redirects to /login), not a 302 whose HTML body they'd have to
+    parse: a logged-out API consumer silently receiving the login page is
+    how 'stuck spinner' bugs get born."""
+    client = make_client()
+    resp = client.get("/api/anything", follow_redirects=False)
+    assert resp.status_code == 401
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json() == {"detail": "unauthorized"}
+
+    # POST too (the chat endpoint), and a non-allowlisted session.
+    resp = client.post("/api/chat", json={"message": "hi"}, follow_redirects=False)
+    assert resp.status_code == 401
+    token = create_session_token("attacker@example.com", "test-secret-that-is-long-enough-1234567890", 3600)
+    client.cookies.set(SESSION_COOKIE, token)
+    resp = client.get("/api/summary", follow_redirects=False)
+    assert resp.status_code == 401
+
+
 def test_oauth_start_redirects_to_google_with_combined_scope():
     """The /login landing page's button hits /oauth-start, which must do
     the Google redirect (combining app login + Drive read in one consent)."""

@@ -8,6 +8,10 @@ Drive access for gdrive_indexer.py.
 Only emails in AUTH_CONFIG['allowed_emails'] can ever get a session --
 completing Google's consent screen is necessary but not sufficient.
 
+Temporary escape hatch: `AUTH_DISABLED=1` (see gdrive_config) makes the
+SessionAuthMiddleware pass every request through -- no sign-in at all.
+Intended for LAN/debug sessions; don't leave it on behind a public endpoint.
+
 The login experience is branded HTML, never JSON: /login renders a Chatty
 landing page with a "Sign in with Google" button that triggers the OAuth
 flow via /oauth-start, and every callback failure (consent denied, state
@@ -22,7 +26,7 @@ import uuid
 
 import fastapi
 from fastapi import Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app_session import SESSION_COOKIE, create_session_token, verify_session_token
@@ -103,15 +107,31 @@ def _error_page(title: str, subtitle: str, error_id: str = None,
 
 
 class SessionAuthMiddleware(BaseHTTPMiddleware):
+    def _unauthorized(self, request: Request):
+        """Browsers get the branded login page; API clients (the web UI's
+        fetch calls) get a 401 they can act on (JS redirects to /login)
+        instead of a redirect whose JSON body they'd parse anyway."""
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return RedirectResponse("/login")
+
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in PUBLIC_PATHS:
+        if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/static"):
+            return await call_next(request)
+
+        if AUTH_CONFIG.get("auth_disabled"):
+            # Temporary escape hatch (AUTH_DISABLED env, see gdrive_config):
+            # skip the session gate entirely. Routes that key off the
+            # signed-in email degrade gracefully without one (no persisted
+            # history/feedback, shared stop event) -- fine for a LAN debug
+            # session, never for a public endpoint.
             return await call_next(request)
 
         email = verify_session_token(
             request.cookies.get(SESSION_COOKIE), AUTH_CONFIG["session_secret"]
         )
         if not email or not _is_allowed_email(email):
-            return RedirectResponse("/login")
+            return self._unauthorized(request)
 
         request.state.user_email = email
         return await call_next(request)

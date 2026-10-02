@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chatty — Document &amp; Drive Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+</head>
+<body>
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <span class="brand-name">Chatty</span>
+      <span class="brand-sub">Document &amp; Drive Assistant</span>
+    </div>
+    <div class="chip" id="index-chip" title="Index status — refreshes automatically"></div>
+    <nav class="nav" role="tablist" aria-label="Views">
+      <button class="nav-btn is-active" data-view="chat" role="tab" aria-selected="true">Chat</button>
+      <button class="nav-btn" data-view="library" role="tab" aria-selected="false">Library</button>
+    </nav>
+    <a class="signout" href="/logout" title="Sign out of Chatty">Sign out</a>
+  </header>
+
+  <main class="main">
+    <!-- ============================ CHAT ============================ -->
+    <section class="view view-chat is-active" id="view-chat">
+      <div class="messages" id="messages" aria-live="polite"></div>
+
+      <div class="composer" id="composer">
+        <textarea id="composer-input" rows="1"
+                  placeholder="Ask about your documents…"
+                  autocomplete="off" autocorrect="off" autocapitalize="off"
+                  spellcheck="false" aria-label="Message"></textarea>
+        <div class="composer-actions">
+          <button class="btn btn-ghost" id="btn-clear"
+                  title="Delete your saved chat history">Clear chat</button>
+          <span class="composer-hint">Enter to send · Shift+Enter for a new line</span>
+          <button class="btn" id="btn-stop" hidden>Stop</button>
+          <button class="btn btn-primary" id="btn-send">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================== LIBRARY =========================== -->
+    <section class="view view-library" id="view-library">
+      <div class="cards">
+        <div class="card">
+          <h3>Add files</h3>
+          <p class="card-hint">.md .txt .pdf .doc .docx .xlsx get indexed; anything else is skipped and named.</p>
+          <label class="dropzone" id="dz-files">
+            <input type="file" id="file-input" multiple
+                   accept=".md,.txt,.pdf,.doc,.docx,.xlsx" hidden>
+            <span class="dz-text">Drop files here or <b>click to choose</b></span>
+          </label>
+          <div class="status" id="status-files"></div>
+        </div>
+
+        <div class="card">
+          <h3>Add a folder</h3>
+          <p class="card-hint">Whole folder in one go — subfolders are kept in the citations.</p>
+          <label class="dropzone dz-folder" id="dz-folder">
+            <input type="file" id="folder-input" webkitdirectory hidden>
+            <span class="dz-text">Drop a folder here or <b>click to choose</b></span>
+          </label>
+          <div class="status" id="status-folder"></div>
+        </div>
+
+        <div class="card">
+          <h3>Google Drive</h3>
+          <p class="card-hint">Re-indexes your connected Drive (read-only). Big libraries take a few minutes.</p>
+          <button class="btn" id="btn-sync">Sync Google Drive now</button>
+          <div class="status" id="status-sync"></div>
+        </div>
+
+        <div class="card">
+          <h3>Teach Chatty a correction</h3>
+          <p class="card-hint">Did it get something wrong? Tell it the right answer and it will use it
+             for similar questions from now on.</p>
+          <label class="field"><span>A question it answered wrong</span>
+            <textarea id="teach-question" rows="2" placeholder="e.g. Which server hosts the deploy env?"></textarea></label>
+          <label class="field"><span>The correct answer</span>
+            <textarea id="teach-answer" rows="3" placeholder="e.g. deploy-5.example.com"></textarea></label>
+          <button class="btn btn-primary" id="btn-teach">Teach this correction</button>
+          <div class="status" id="status-teach"></div>
+        </div>
+
+        <div class="card">
+          <h3>Index
+            <button class="btn btn-ghost btn-sm" id="btn-stats-refresh" title="Refresh index stats">Refresh</button>
+          </h3>
+          <div class="stats" id="index-stats"><span class="muted">Loading…</span></div>
+        </div>
+
+        <div class="card">
+          <h3>Recent mis-answers
+            <button class="btn btn-ghost btn-sm" id="btn-fb-refresh" title="Refresh mis-answer list">Refresh</button>
+          </h3>
+          <p class="card-hint">From your 👎 feedback — pick one to prefill the correction form above.</p>
+          <select id="fb-select"><option value="">— no dislikes recorded yet —</option></select>
+          <div class="fb-preview" id="fb-preview"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""Markdown Chatbot using Ollama, Postgres/pgvector, and a custom web UI.
+
+Same role as chromadb_chatty.py, backed by pgvector instead of ChromaDB.
+The UI is the shared custom web app (api_routes.py serving static/), not
+Gradio: this module provides the backend (retrieval, prompting, persistence,
+indexing) through the small protocol the web API drives (prepare_turn /
+stream_answer / save_message / ...).
+"""
 import logging
 import os
 import threading
@@ -6,49 +14,31 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import fastapi
-import gradio as gr
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pgvector import Vector
 from pgvector.psycopg2 import register_vector
 
-from admin_ui import build_admin_tab
-from app_session import get_email_from_request
-from auth_routes import register_routes as register_auth_routes
-from gdrive_config import AUTH_CONFIG
+from api_routes import build_app as build_web_app
 from pgv_config import CHAT_CONFIG, DB_CONFIG, DB_POOL_CONFIG, OLLAMA_CONFIG
 from pgv_schema import ensure_markdown_chunks_schema
 from rag_common import (
     CATEGORY_MIME_TYPES,
-    TYPING_INDICATOR_HTML,
     build_catalog_chat_messages,
-    build_catalog_sources_footer,
-    build_chat_messages,
     build_ollama_client,
-    build_sources_footer,
+    build_chat_messages,
+    catalog_sources_payload,
+    content_sources_payload,
     detect_catalog_intent,
     detect_mentioned_sources,
     DriveSyncGate,
     embed_text,
     ensure_model_loaded,
-    error_bubble,
     read_drive_sync_timestamp,
     record_drive_sync_timestamp,
-    safe_error_message,
-    stopped_html,
-    WELCOME_MESSAGE,
-    validate_message,
+    StopEvents,
     with_retries,
 )
-from ui_common import (
-    CHATTY_CSS,
-    CHATTY_THEME,
-    INDEX_CHIP_INTERVAL_SECONDS,
-    build_chat_tab,
-    format_index_chip,
-)
-
-os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +76,10 @@ class PGVectorChat:
         # Serializes Drive syncs: one click already spawns a worker pool;
         # a second concurrent click would re-embed the whole corpus again.
         self._sync_gate = DriveSyncGate()
+        # Per-user stop Events (one per signed-in operator); the web API
+        # keys streams by session email, so Stop can't cross sessions.
+        self._stop_events = StopEvents()
+        self.max_message_length = CHAT_CONFIG["max_message_length"]
         with self._connection() as conn:
             ensure_markdown_chunks_schema(
                 conn, OLLAMA_CONFIG["embedding_dim"], OLLAMA_CONFIG["embedding_model"]
@@ -125,16 +119,31 @@ class PGVectorChat:
             conn.commit()
 
     def load_history(self, user_email: str, limit: int = 200) -> List[Dict]:
+        """This user's persisted messages, oldest first. created_at comes
+        back as ISO-8601 (psycopg2 returns aware datetimes for timestamptz)
+        so the web UI can render it in local time."""
+        from datetime import timezone
+
+        def _iso(value) -> Optional[str]:
+            if not hasattr(value, "astimezone"):
+                return None
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).isoformat()
+
         with self._connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT role, content FROM ("
+                    "SELECT role, content, created_at FROM ("
                     "  SELECT role, content, created_at FROM chat_history"
                     "  WHERE user_email = %s ORDER BY created_at DESC, id DESC LIMIT %s"
                     ") sub ORDER BY created_at ASC",
                     (user_email, limit),
                 )
-                return [{"role": role, "content": content} for role, content in cursor.fetchall()]
+                return [
+                    {"role": role, "content": content, "created_at": _iso(created)}
+                    for role, content, created in cursor.fetchall()
+                ]
 
     def clear_history(self, user_email: str) -> None:
         with self._connection() as conn:
@@ -161,40 +170,25 @@ class PGVectorChat:
                 )
             conn.commit()
 
-    def record_feedback(self, history: List[Dict], like_data: "gr.LikeData",
-                        request: "gr.Request" = None) -> None:
-        """Persist a Like/Dislike on an assistant message together with the
-        question it answered -- the reviewable record of what the bot got
-        wrong (and the seed for teaching a correction in the Admin tab).
+    def record_feedback(self, email: str, question: str, answer: str, rating: str) -> None:
+        """Persist a 👍/👎 rating on an answer together with the question it
+        answered -- the reviewable record of what the bot got wrong (and the
+        seed for teaching a correction in the Library view; the web UI sends
+        the thread's question + answer text, so no index lookups here).
         Never raises: failing to record feedback must not break the chat.
         """
         try:
-            idx = like_data.index
-            if isinstance(idx, tuple):
-                idx = idx[0]
-            answer = history[idx].get("content", "") if isinstance(idx, int) and 0 <= idx < len(history) else ""
-            question = ""
-            for message in reversed(history[:idx]):
-                if message.get("role") == "user":
-                    question = message.get("content", "")
-                    break
-            rating = (
-                "like" if like_data.liked is True
-                else "dislike" if like_data.liked is False
-                else str(like_data.liked)
-            )
-            user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"]) or "anonymous"
             with self._connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         "INSERT INTO feedback (user_email, question, answer, rating) "
                         "VALUES (%s, %s, %s, %s)",
-                        (user_email, question, answer, rating),
+                        (email, question, answer, rating),
                     )
                 conn.commit()
             logger.info(
                 "Recorded %s feedback from %s on the answer to %r",
-                rating, user_email, question[:80],
+                rating, email, (question or "")[:80],
             )
         except Exception:
             logger.warning("Failed to record chat feedback", exc_info=True)
@@ -341,11 +335,12 @@ class PGVectorChat:
                 i -= 1
         return result[::-1]
 
-    def _prepare_messages(self, query: str, history: List[Dict]):
-        """Build the RAG prompt AND the 'Sources' footer that gets shown
-        under the answer (the documents actually fed to the model). Split
-        from get_answer_stream so respond() can attach the footer without
-        retrieving the context a second time."""
+    def prepare_turn(self, query: str, history: List[Dict]):
+        """Build the RAG prompt AND the structured 'Sources' payload that
+        the web UI renders under the answer (the documents actually fed to
+        the model). Split from the streaming step so the turn's driver
+        (api_routes.chat_stream_events) can attach it without retrieving the
+        context a second time."""
         conversation_context = "\n".join(
             f"User: {u}\nAssistant: {a}" for u, a in self.get_last_conversation(history)
         )
@@ -354,14 +349,14 @@ class PGVectorChat:
         if catalog_intent:
             docs = self.list_documents(**catalog_intent)
             messages = build_catalog_chat_messages(docs, conversation_context, query)
-            sources_md = build_catalog_sources_footer(docs)
+            sources = catalog_sources_payload(docs)
         else:
             context_chunks = self.get_context_chunks(query)
             messages = build_chat_messages(context_chunks, conversation_context, query)
-            sources_md = build_sources_footer(context_chunks)
-        return messages, sources_md
+            sources = content_sources_payload(context_chunks)
+        return messages, sources
 
-    def _stream_answer(self, messages: List[Dict], stop_event: threading.Event):
+    def stream_answer(self, messages: List[Dict], stop_event: threading.Event):
         """Stream the model's answer, yielding the growing text."""
         response_stream = self.ollama_client.chat(
             model=OLLAMA_CONFIG["chat_model"],
@@ -385,110 +380,12 @@ class PGVectorChat:
             full_response += content
             yield full_response
 
-    def get_answer_stream(self, query: str, history: List[Dict], stop_event: threading.Event):
-        """Generate streaming response."""
-        messages, _sources = self._prepare_messages(query, history)
-        yield from self._stream_answer(messages, stop_event)
+    # The chat turn's orchestration (validate -> prepare -> stream ->
+    # persist, plus error/stopped classification) is backend-agnostic and
+    # lives in api_routes.chat_stream_events, driven through this class's
+    # prepare_turn/stream_answer/save_message methods. Stop is signaled via
+    # self._stop_events (per signed-in user), not a per-request state dict.
 
-    def respond(self, message: str, history: List[Dict], state: Dict, request: gr.Request = None):
-        """Handle chat response. `state` is a per-session dict holding this
-        session's own stop Event, so one user's Stop button can't affect
-        another user's in-flight stream. Persists both sides of the
-        exchange to chat_history for the logged-in user (from the session
-        cookie), if the request can be identified.
-
-        Display vs persistence: the user sees the raw model text plus
-        decorations (sources footer, error/stopped styling); what's saved
-        to history is the raw text, so reloads and feedback records stay
-        clean.
-        """
-        if state is None:
-            state = {}
-        stop_event = state.setdefault("stop_event", threading.Event())
-        stop_event.clear()
-
-        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
-        base = (history or []) + [{"role": "user", "content": message}]
-
-        try:
-            validate_message(message, CHAT_CONFIG["max_message_length"])
-        except ValueError as e:
-            yield (base + [{"role": "assistant", "content": error_bubble(str(e))}], "", state)
-            return
-
-        yield (base + [{"role": "assistant", "content": TYPING_INDICATOR_HTML}], "", state)
-
-        raw_answer = None      # model text as-is (what gets persisted)
-        sources_md = None      # footer for completed content-search answers
-        error_text = None      # set when preparation/streaming failed
-        persist_text = None
-        try:
-            messages, sources_md = self._prepare_messages(message, history)
-            for partial_response in self._stream_answer(messages, stop_event):
-                if stop_event.is_set():
-                    break
-                raw_answer = partial_response
-                yield (base + [{"role": "assistant", "content": partial_response}], "", state)
-        except Exception as e:
-            error_text = safe_error_message(e, logger)
-            yield (base + [{"role": "assistant", "content": error_bubble(error_text)}], "", state)
-
-        if error_text is not None:
-            # Keep the old behavior: the (safe, generic) error text is
-            # history that should be reviewable, so it gets persisted.
-            persist_text = error_text
-        elif raw_answer is None:
-            # The stream produced no text (stopped before the first token,
-            # or the model returned nothing at all): don't leave the typing
-            # dots frozen on screen as if it were still thinking.
-            if stop_event.is_set():
-                yield (base + [{"role": "assistant", "content": stopped_html()}], "", state)
-            else:
-                yield (
-                    base + [{"role": "assistant",
-                             "content": error_bubble("The model returned no response content.")}],
-                    "",
-                    state,
-                )
-        else:
-            display = raw_answer
-            if stop_event.is_set():
-                display += stopped_html()
-            elif sources_md:
-                display += sources_md
-            yield (base + [{"role": "assistant", "content": display}], "", state)
-            persist_text = raw_answer
-
-        if user_email and persist_text:
-            self.save_message(user_email, "user", message)
-            self.save_message(user_email, "assistant", persist_text)
-
-    def stop_chat(self, history: List[Dict], state: Dict):
-        """Stop current chat response for this session only."""
-        if state is None:
-            state = {}
-        stop_event = state.setdefault("stop_event", threading.Event())
-        stop_event.set()
-        return (history, "", state)
-
-    def load_history_ui(self, request: gr.Request = None) -> List[Dict]:
-        """Populate the Chat tab with this user's persisted history on page
-        load (a fresh gr.State is per-browser-session, so without this a
-        reload looks like history was lost even though it's saved
-        server-side). A user with no history yet gets the welcome message
-        so the window doesn't open blank (only displayed, never persisted).
-        """
-        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
-        if not user_email:
-            return []
-        return self.load_history(user_email) or [WELCOME_MESSAGE]
-
-    def clear_chat_ui(self, request: gr.Request = None):
-        """Clear both the visible chat and this user's persisted history."""
-        user_email = get_email_from_request(request, AUTH_CONFIG["session_secret"])
-        if user_email:
-            self.clear_history(user_email)
-        return ([], "", {})
 
     def count_chunks(self) -> int:
         with self._connection() as conn:
@@ -564,54 +461,11 @@ class PGVectorChat:
 
 
 def build_app(chat: "PGVectorChat") -> fastapi.FastAPI:
-    """Build the Gradio UI + FastAPI app around an existing PGVectorChat
-    instance. Split out from main() so the UI construction (which uses a real
-    Gradio/FastAPI API surface) is exercised by tests, not just chat's methods.
-    """
-    with gr.Blocks(title="Chatty") as blocks:
-        with gr.Row(elem_id="chatty-topbar"):
-            gr.Markdown("# Chatty\nDocument & Drive Assistant", elem_id="chatty-brand")
-            index_chip = gr.Markdown("", elem_id="chatty-chip")
-            gr.Markdown("[Sign out](/logout)", elem_id="signout-link")
-
-        # All chrome (theme, labels, layout, chat wiring) lives in the
-        # shared builders so the ChromaDB variant renders identically.
-        build_chat_tab(chat, blocks)
-        build_admin_tab(
-            chat.index_text, chat.index_summary, chat.sync_drive,
-            feedback_rows_fn=chat.load_feedback, blocks=blocks,
-        )
-
-        # Top-bar chip: first paint on load, then live via the timer.
-        def _chip() -> str:
-            return format_index_chip(chat.index_summary())
-
-        blocks.load(_chip, None, index_chip, show_progress="hidden")
-        gr.Timer(INDEX_CHIP_INTERVAL_SECONDS).tick(_chip, None, index_chip)
-
-    app = fastapi.FastAPI()
-
-    @app.get("/health")
-    def health():
-        ok = chat.health_check()
-        status_code = 200 if ok else 503
-        return fastapi.responses.JSONResponse(
-            {"status": "ok" if ok else "unavailable"}, status_code=status_code
-        )
-
-    # Gates every other route (including the Gradio UI mounted below) behind
-    # Google sign-in restricted to AUTH_CONFIG['allowed_emails'].
-    register_auth_routes(app)
-
-    gr.mount_gradio_app(
-        app,
-        blocks.queue(),
-        path="/",
-        footer_links=[],
-        theme=CHATTY_THEME,
-        css=CHATTY_CSS,
-    )
-    return app
+    """Build the FastAPI app (health + auth gate + web UI/API) around
+    an existing PGVectorChat instance. The assembly lives in
+    api_routes so both backends deliver byte-identical chrome; kept here
+    so tests/main() keep importing build_app from the variant module."""
+    return build_web_app(chat)
 
 
 def main():

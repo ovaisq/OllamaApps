@@ -42,4 +42,9 @@ AUTH_CONFIG = {
     'allowed_emails': {
         e.strip().lower() for e in os.getenv('ALLOWED_EMAILS', '').split(',') if e.strip()
     },
+    # Temporary escape hatch for LAN/debug sessions: `AUTH_DISABLED=1` makes
+    # the SessionAuthMiddleware gate pass everything through -- no sign-in,
+    # no session cookie, per-user history/feedback simply don't persist
+    # (they key off the signed-in email, which is absent). Off by default.
+    'auth_disabled': os.getenv('AUTH_DISABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'),
 }
